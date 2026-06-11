@@ -1,0 +1,343 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { getCalendar } from '../lib/matches';
+import { buildGroupStandings, type GroupStanding } from '../lib/standings';
+import { supabase } from '../lib/supabase';
+import { getFlagUrl } from '../lib/flags';
+
+export const prerender = false;
+
+let standings: GroupStanding[] = [];
+let loadError: string | null = null;
+const flags: Record<string, string | null> = {};
+
+try {
+  const matches = await getCalendar();
+  standings = buildGroupStandings(matches);
+
+  const { data, error } = await supabase
+    .from('team_stats')
+    .select('team_name, eloratings_team_name');
+
+  if (error) {
+    throw new Error(`Error al consultar los equipos: ${error.message}`);
+  }
+
+  for (const row of data ?? []) {
+    flags[row.team_name] = row.eloratings_team_name
+      ? getFlagUrl(row.eloratings_team_name, 40)
+      : null;
+  }
+} catch (error) {
+  loadError = error instanceof Error ? error.message : 'Error desconocido al cargar los grupos.';
+}
+
+const totalPredicted = standings.reduce((sum, group) => sum + group.predicted_matches, 0);
+const totalReal = standings.reduce((sum, group) => sum + group.real_matches, 0);
+---
+
+<Layout title="Mundial 2026 · Grupos">
+  <main class="groups-page">
+    <header class="page-header">
+      <p class="kicker">Copa Mundial FIFA 2026</p>
+      <h1>Tablas de Posiciones</h1>
+      <p class="subtitle">
+        Clasificación híbrida: resultados oficiales cuando existen, predicciones del motor de
+        consenso para lo que falta por jugarse. Partidos sin predicción no suman puntos.
+      </p>
+      <div class="totals">
+        <span class="total-chip real">{totalReal} resultados reales</span>
+        <span class="total-chip predicted">{totalPredicted} predicciones aplicadas</span>
+      </div>
+    </header>
+
+    {loadError && <div class="error-banner">{loadError}</div>}
+
+    <div class="groups-grid">
+      {
+        standings.map((group) => (
+          <section class="group-card">
+            <header class="group-header">
+              <h2>{group.group}</h2>
+              <span class="group-mix">
+                {group.real_matches > 0 && <span class="mix-chip real">{group.real_matches} real</span>}
+                {group.predicted_matches > 0 && (
+                  <span class="mix-chip predicted">{group.predicted_matches} IA</span>
+                )}
+              </span>
+            </header>
+            <table class="standings-table">
+              <thead>
+                <tr>
+                  <th class="pos">#</th>
+                  <th class="team">Equipo</th>
+                  <th>PJ</th>
+                  <th>G</th>
+                  <th>E</th>
+                  <th>P</th>
+                  <th>GF</th>
+                  <th>GC</th>
+                  <th>DIF</th>
+                  <th class="pts">PTS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.rows.map((row, index) => (
+                  <tr class={index < 2 ? 'qualifying' : ''}>
+                    <td class="pos">{index + 1}</td>
+                    <td class="team">
+                      {flags[row.team] && <img class="flag-mini" src={flags[row.team]} alt="" loading="lazy" />}
+                      <span>{row.team}</span>
+                      {row.predicted_matches > 0 && (
+                        <span class="ia-mark" title={`${row.predicted_matches} resultado(s) predichos por IA`}>
+                          IA
+                        </span>
+                      )}
+                    </td>
+                    <td>{row.played}</td>
+                    <td>{row.wins}</td>
+                    <td>{row.draws}</td>
+                    <td>{row.losses}</td>
+                    <td>{row.goals_for}</td>
+                    <td>{row.goals_against}</td>
+                    <td>{row.goal_difference > 0 ? `+${row.goal_difference}` : row.goal_difference}</td>
+                    <td class="pts">{row.points}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        ))
+      }
+    </div>
+  </main>
+</Layout>
+
+<style>
+  .groups-page {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 4rem;
+  }
+
+  .page-header {
+    text-align: center;
+    margin-bottom: 2rem;
+  }
+
+  .kicker {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    color: var(--text-faint);
+  }
+
+  .page-header h1 {
+    font-size: clamp(1.8rem, 4.5vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    margin: 0.35rem 0 0.6rem;
+  }
+
+  .subtitle {
+    max-width: 560px;
+    margin: 0 auto;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+  }
+
+  .totals {
+    display: flex;
+    justify-content: center;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .total-chip {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.32rem 0.85rem;
+    border-radius: 999px;
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    color: var(--text-muted);
+  }
+
+  .total-chip.real {
+    border-color: rgba(110, 231, 183, 0.4);
+    color: rgba(170, 255, 210, 0.95);
+  }
+
+  .total-chip.predicted {
+    border-color: rgba(125, 180, 255, 0.4);
+    color: rgba(170, 205, 255, 0.95);
+  }
+
+  .error-banner {
+    max-width: 560px;
+    margin: 0 auto 2rem;
+    border: 1px solid rgba(255, 120, 120, 0.4);
+    background: rgba(255, 120, 120, 0.08);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    font-size: 0.9rem;
+  }
+
+  .groups-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .group-card {
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 14px 40px rgba(0, 0, 0, 0.3);
+  }
+
+  .group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.9rem 1.1rem;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .group-header h2 {
+    font-size: 0.95rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .group-mix {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .mix-chip {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--glass-border);
+    color: var(--text-muted);
+  }
+
+  .mix-chip.real {
+    border-color: rgba(110, 231, 183, 0.4);
+    color: rgba(170, 255, 210, 0.95);
+  }
+
+  .mix-chip.predicted {
+    border-color: rgba(125, 180, 255, 0.4);
+    color: rgba(170, 205, 255, 0.95);
+  }
+
+  .standings-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: transparent;
+  }
+
+  .standings-table th {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    color: var(--text-faint);
+    padding: 0.55rem 0.45rem;
+    text-align: center;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .standings-table td {
+    padding: 0.55rem 0.45rem;
+    font-size: 0.8rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .standings-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .standings-table tbody tr {
+    transition: background 0.2s ease;
+  }
+
+  .standings-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .standings-table tr.qualifying td {
+    background: rgba(110, 231, 183, 0.05);
+  }
+
+  .standings-table tr.qualifying td:first-child {
+    box-shadow: inset 3px 0 0 rgba(110, 231, 183, 0.55);
+  }
+
+  .standings-table .pos {
+    width: 2rem;
+    color: var(--text-muted);
+  }
+
+  .standings-table .team {
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .standings-table td.team {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .standings-table .pts {
+    font-weight: 800;
+  }
+
+  .flag-mini {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid var(--glass-border);
+  }
+
+  .ia-mark {
+    font-size: 0.55rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    padding: 0.1rem 0.35rem;
+    border-radius: 5px;
+    border: 1px solid rgba(125, 180, 255, 0.4);
+    color: rgba(170, 205, 255, 0.95);
+  }
+
+  @media (max-width: 480px) {
+    .groups-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .standings-table th,
+    .standings-table td {
+      padding: 0.45rem 0.3rem;
+      font-size: 0.72rem;
+    }
+  }
+</style>

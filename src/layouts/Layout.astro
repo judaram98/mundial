@@ -1,0 +1,193 @@
+---
+interface Props {
+  title: string;
+}
+
+const { title } = Astro.props;
+const currentPath = Astro.url.pathname;
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Calendario, grupos y predicciones IA de la fase de grupos del Mundial 2026" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>{title}</title>
+  </head>
+  <body>
+    <div class="top-nav-wrapper">
+      <nav class="top-nav">
+        <span class="brand">
+          <span class="brand-dot"></span>
+          Mundial 2026 · Predicciones IA
+        </span>
+        <div class="nav-links">
+          <a href="/" class={currentPath === '/' ? 'active' : ''}>Calendario</a>
+          <a href="/grupos" class={currentPath.startsWith('/grupos') ? 'active' : ''}>Grupos</a>
+        </div>
+      </nav>
+    </div>
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  *,
+  *::before,
+  *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  :root {
+    --glass-bg: rgba(20, 25, 40, 0.45);
+    --glass-bg-strong: rgba(255, 255, 255, 0.08);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-border-bright: rgba(255, 255, 255, 0.15);
+    --glass-blur: blur(24px);
+    --text-primary: #ffffff;
+    --text-muted: #94a3b8;
+    --text-faint: #64748b;
+    --accent-home: #3b82f6;
+    --accent-draw: #8b5cf6;
+    --accent-away: #ec4899;
+    --accent-glow: rgba(59, 130, 246, 0.4);
+    --nav-height: 64px;
+  }
+
+  body {
+    min-height: 100vh;
+    font-family: 'Outfit', 'Inter', system-ui, sans-serif;
+    color: var(--text-primary);
+    background:
+      radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.15) 0%, transparent 40%),
+      radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.15) 0%, transparent 40%),
+      radial-gradient(circle at 50% 50%, rgba(59, 130, 246, 0.1) 0%, transparent 60%),
+      #0b0f19;
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+
+  button {
+    font-family: inherit;
+  }
+
+  .top-nav-wrapper {
+    position: sticky;
+    top: 1rem;
+    z-index: 40;
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    padding: 0 1.5rem;
+    pointer-events: none;
+  }
+
+  .top-nav {
+    pointer-events: auto;
+    height: var(--nav-height);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1.5rem;
+    background: rgba(15, 23, 42, 0.5);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: 999px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    width: 100%;
+    max-width: 1200px;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+  }
+
+  .top-nav:hover {
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--glass-border-bright);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    font-size: 0.95rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+    background: linear-gradient(to right, #60a5fa, #a78bfa, #f472b6);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .brand-dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: #60a5fa;
+    box-shadow: 0 0 12px var(--accent-glow);
+    animation: pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.1); }
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .nav-links a {
+    position: relative;
+    padding: 0.55rem 1.25rem;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
+  }
+
+  .nav-links a::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(120deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+    transform: translateX(-100%);
+    transition: transform 0.6s ease;
+  }
+
+  .nav-links a:hover::before {
+    transform: translateX(100%);
+  }
+
+  .nav-links a:hover {
+    color: var(--text-primary);
+    background: var(--glass-bg-strong);
+    transform: translateY(-1px);
+  }
+
+  .nav-links a.active {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--glass-border-bright);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+</style>

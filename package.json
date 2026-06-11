@@ -1,0 +1,31 @@
+{
+  "name": "mundial-2026-predictor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "seed": "node --env-file=.env scripts/seed.js",
+    "map-teams": "node --env-file=.env scripts/map-teams.js",
+    "ingest": "node --env-file=.env --import tsx scripts/ingest-real-data.js",
+    "clear-cache": "node --env-file=.env scripts/clear-cache.js",
+    "precompute": "node --env-file=.env --import tsx scripts/precompute-predictions.js",
+    "hard-reset": "node --env-file=.env scripts/hard-reset.js",
+    "deploy-reality": "node scripts/deploy-reality.js"
+  },
+  "dependencies": {
+    "@astrojs/node": "^10.1.4",
+    "@supabase/supabase-js": "^2.108.1",
+    "astro": "^6.4.6",
+    "cheerio": "^1.0.0",
+    "openai": "^6.42.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "@types/node": "^25.9.3",
+    "pg": "^8.21.0",
+    "tsx": "^4.19.2",
+    "typescript": "^6.0.3"
+  }
+}

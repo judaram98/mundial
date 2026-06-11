@@ -1,0 +1,1000 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { getCalendar, type Match } from '../lib/matches';
+import { supabase } from '../lib/supabase';
+import { getFlagUrl } from '../lib/flags';
+import { stageShortLabel } from '../lib/stages';
+
+export const prerender = false;
+
+interface TeamPanelInfo {
+  team_name: string;
+  elo: number;
+  elo_cycle_start: number;
+  avg_goals_scored: number;
+  avg_goals_conceded: number;
+  matches_played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  form_last_five: string;
+  form_trend: string;
+  data_source: string;
+  flag: string | null;
+}
+
+let matches: Match[] = [];
+let loadError: string | null = null;
+const teams: Record<string, TeamPanelInfo> = {};
+
+try {
+  matches = await getCalendar();
+
+  const { data, error } = await supabase
+    .from('team_stats')
+    .select(
+      'team_name, eloratings_team_name, elo, elo_cycle_start, avg_goals_scored, avg_goals_conceded, matches_played, wins, draws, losses, form_last_five, form_trend, data_source'
+    );
+
+  if (error) {
+    throw new Error(`Error al consultar las estadísticas: ${error.message}`);
+  }
+
+  for (const row of data ?? []) {
+    teams[row.team_name] = {
+      team_name: row.team_name,
+      elo: row.elo,
+      elo_cycle_start: row.elo_cycle_start,
+      avg_goals_scored: Number(row.avg_goals_scored),
+      avg_goals_conceded: Number(row.avg_goals_conceded),
+      matches_played: row.matches_played,
+      wins: row.wins,
+      draws: row.draws,
+      losses: row.losses,
+      form_last_five: row.form_last_five,
+      form_trend: row.form_trend,
+      data_source: row.data_source,
+      flag: row.eloratings_team_name ? getFlagUrl(row.eloratings_team_name, 160) : null
+    };
+  }
+} catch (error) {
+  loadError = error instanceof Error ? error.message : 'Error desconocido al cargar los datos.';
+}
+
+const flagFor = (teamName: string): string | null =>
+  teams[teamName]?.flag ?? getFlagUrl(teamName, 160);
+
+const dateFormatter = new Intl.DateTimeFormat('es-ES', {
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  timeZone: 'UTC'
+});
+
+const timeFormatter = new Intl.DateTimeFormat('es-ES', {
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: 'UTC'
+});
+
+const matchesByDay = new Map<string, Match[]>();
+
+for (const match of matches) {
+  const dayKey = dateFormatter.format(new Date(match.date));
+  const dayMatches = matchesByDay.get(dayKey) ?? [];
+  dayMatches.push(match);
+  matchesByDay.set(dayKey, dayMatches);
+}
+
+const clientPayload = {
+  teams,
+  matches: matches.map((match) => ({
+    id: match.id,
+    date: match.date,
+    home_team: match.home_team,
+    away_team: match.away_team,
+    home_score: match.home_score,
+    away_score: match.away_score,
+    status: match.status,
+    group_name: match.group_name,
+    matchday: match.matchday,
+    stage: match.stage,
+    has_cache: Boolean(match.prediction_cache)
+  }))
+};
+---
+
+<Layout title="Mundial 2026 · Predicciones IA">
+  <div class="app-shell">
+    <aside class="sidebar glass-panel">
+      <header class="sidebar-header">
+        <p class="kicker">Copa Mundial FIFA 2026</p>
+        <h1>Calendario Completo</h1>
+      </header>
+
+      {loadError && <div class="error-banner">{loadError}</div>}
+
+      <div class="match-list">
+        {
+          [...matchesByDay.entries()].map(([day, dayMatches]) => (
+            <section class="day-block">
+              <h2 class="day-label">{day}</h2>
+              {dayMatches.map((match) => {
+                const homeFlag = flagFor(match.home_team);
+                const awayFlag = flagFor(match.away_team);
+                return (
+                  <button
+                    class="match-item"
+                    type="button"
+                    data-match-id={match.id}
+                    aria-label={`Analizar ${match.home_team} contra ${match.away_team}`}
+                  >
+                    <span class="match-time">{timeFormatter.format(new Date(match.date))}</span>
+                    <span class="match-teams">
+                      <span class="match-row">
+                        {homeFlag && <img class="flag-mini" src={homeFlag} alt="" loading="lazy" />}
+                        <span>{match.home_team}</span>
+                        {match.status === 'finished' && <strong class="mini-score">{match.home_score}</strong>}
+                      </span>
+                      <span class="match-row">
+                        {awayFlag && <img class="flag-mini" src={awayFlag} alt="" loading="lazy" />}
+                        <span>{match.away_team}</span>
+                        {match.status === 'finished' && <strong class="mini-score">{match.away_score}</strong>}
+                      </span>
+                    </span>
+                    <span class="match-meta">
+                      <span class="group-chip">{match.group_name ?? stageShortLabel(match.stage)}</span>
+                      {match.prediction_cache && <span class="cache-dot" title="Predicción en caché"></span>}
+                    </span>
+                  </button>
+                );
+              })}
+            </section>
+          ))
+        }
+      </div>
+    </aside>
+
+    <main class="main-view glass-panel" id="main-view">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-orb"></div>
+        <h2>Selecciona un partido</h2>
+        <p>
+          Elige un encuentro del calendario para ver la predicción del motor de consenso, las
+          probabilidades y el cara a cara estadístico del ciclo 2022–2026.
+        </p>
+      </div>
+      <div id="analysis-view" hidden></div>
+    </main>
+  </div>
+
+  <script is:inline type="application/json" id="app-data" set:html={JSON.stringify(clientPayload)} />
+</Layout>
+
+<style>
+  .app-shell {
+    display: grid;
+    grid-template-columns: 350px 1fr;
+    gap: 1.5rem;
+    max-width: 1400px;
+    margin: 2rem auto 0;
+    padding: 0 1.5rem 1.5rem;
+    height: calc(100vh - 120px);
+  }
+
+  .glass-panel {
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: 24px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 18px 50px rgba(0, 0, 0, 0.3);
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sidebar-header {
+    padding: 1.5rem 1.5rem 1.25rem;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .kicker {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    color: var(--accent-home);
+    font-weight: 700;
+  }
+
+  .sidebar-header h1 {
+    font-size: 1.45rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    margin-top: 0.3rem;
+    background: linear-gradient(to right, #ffffff, #94a3b8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .error-banner {
+    margin: 1rem 1.25rem 0;
+    border: 1px solid rgba(255, 120, 120, 0.4);
+    background: rgba(255, 120, 120, 0.08);
+    border-radius: 10px;
+    padding: 0.8rem 1rem;
+    font-size: 0.85rem;
+  }
+
+  .match-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.75rem;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  }
+
+  .day-block {
+    margin-bottom: 1rem;
+  }
+
+  .day-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: capitalize;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+    padding: 0.4rem 0.5rem;
+  }
+
+  .match-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    text-align: left;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    border-radius: 16px;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .match-item:hover {
+    background: var(--glass-bg-strong);
+    border-color: var(--glass-border-bright);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+
+  .match-item.selected {
+    background: var(--glass-bg-strong);
+    border-color: var(--accent-home);
+    box-shadow: 0 0 0 1px var(--accent-home), 0 8px 24px rgba(0, 0, 0, 0.2);
+  }
+
+  .match-time {
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+  }
+
+  .match-teams {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.84rem;
+    font-weight: 600;
+  }
+
+  .match-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .mini-score {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .flag-mini {
+    width: 1.15rem;
+    height: 1.15rem;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid var(--glass-border);
+  }
+
+  .match-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.35rem;
+  }
+
+  .group-chip {
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    padding: 0.18rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--glass-border);
+    color: var(--text-muted);
+  }
+
+  .cache-dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: rgba(110, 231, 183, 0.9);
+    box-shadow: 0 0 8px rgba(110, 231, 183, 0.6);
+  }
+
+  .main-view {
+    overflow-y: auto;
+    padding: 2rem;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  }
+
+  #analysis-view {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .empty-state {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 1rem;
+    color: var(--text-muted);
+  }
+
+  .empty-orb {
+    width: 6.5rem;
+    height: 6.5rem;
+    border-radius: 50%;
+    border: 1px solid var(--glass-border-bright);
+    background:
+      radial-gradient(circle at 30% 30%, rgba(96, 165, 250, 0.4), transparent 60%),
+      radial-gradient(circle at 70% 70%, rgba(244, 114, 182, 0.4), transparent 60%);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: 
+      inset 0 1px 0 rgba(255, 255, 255, 0.2),
+      0 0 40px rgba(96, 165, 250, 0.2);
+    animation: float 6s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+
+  .empty-state h2 {
+    font-size: 1.3rem;
+    color: var(--text-primary);
+  }
+
+  .empty-state p {
+    max-width: 420px;
+    font-size: 0.9rem;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 900px) {
+    .app-shell {
+      grid-template-columns: 1fr;
+      height: auto;
+    }
+
+    .sidebar {
+      max-height: 45vh;
+    }
+
+    .main-view {
+      min-height: 60vh;
+    }
+  }
+</style>
+
+<style is:global>
+  .matchup-header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.75rem;
+  }
+
+  .team-side {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    text-align: center;
+  }
+
+  .flag-large {
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--glass-border-bright);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.2),
+      0 10px 30px rgba(0, 0, 0, 0.45);
+  }
+
+  .flag-placeholder {
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--text-muted);
+    border: 2px solid var(--glass-border);
+    background: var(--glass-bg-strong);
+  }
+
+  .team-side h3 {
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+
+  .center-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .predicted-score {
+    font-size: 2.6rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.05em;
+  }
+
+  .score-caption {
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    color: var(--text-faint);
+  }
+
+  .meta-chips {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .chip {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.28rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    color: var(--text-muted);
+  }
+
+  .chip.certainty-ALTA {
+    border-color: rgba(110, 231, 183, 0.45);
+    color: rgba(170, 255, 210, 0.95);
+  }
+
+  .chip.certainty-MEDIA {
+    border-color: rgba(255, 220, 140, 0.45);
+    color: rgba(255, 230, 170, 0.95);
+  }
+
+  .chip.certainty-BAJA {
+    border-color: rgba(255, 150, 140, 0.45);
+    color: rgba(255, 180, 170, 0.95);
+  }
+
+  .section-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--text-faint);
+    margin: 1.75rem 0 0.85rem;
+  }
+
+  .prob-bar {
+    display: flex;
+    height: 1.4rem;
+    border-radius: 999px;
+    overflow: hidden;
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+  }
+
+  .prob-segment {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: rgba(5, 12, 22, 0.85);
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: width 0.6s ease;
+  }
+
+  .prob-segment.home {
+    background: var(--accent-home);
+  }
+
+  .prob-segment.draw {
+    background: var(--accent-draw);
+  }
+
+  .prob-segment.away {
+    background: var(--accent-away);
+  }
+
+  .prob-legend {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .legend-swatch {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 3px;
+  }
+
+  .legend-swatch.home {
+    background: var(--accent-home);
+  }
+
+  .legend-swatch.draw {
+    background: var(--accent-draw);
+  }
+
+  .legend-swatch.away {
+    background: var(--accent-away);
+  }
+
+  .stats-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  .stats-table td {
+    padding: 0.7rem 1rem;
+    font-size: 0.86rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .stats-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .stats-table .metric-label {
+    text-align: center;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+  }
+
+  .stats-table .value {
+    width: 32%;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+
+  .stats-table .value.leading {
+    color: rgba(170, 255, 210, 0.95);
+  }
+
+  .analysis-block {
+    border-left: 2px solid var(--glass-border-bright);
+    padding-left: 1rem;
+    font-size: 0.92rem;
+    line-height: 1.7;
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .consensus-list {
+    list-style: none;
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  .consensus-list li {
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border-radius: 12px;
+    padding: 0.8rem 1rem;
+    font-size: 0.84rem;
+    line-height: 1.55;
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  .consensus-list strong {
+    display: block;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-faint);
+    margin-bottom: 0.3rem;
+  }
+
+  .loading-state {
+    flex: 1;
+    min-height: 300px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+
+  .spinner {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.12);
+    border-top-color: rgba(255, 255, 255, 0.75);
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .analysis-error {
+    border: 1px solid rgba(255, 140, 130, 0.4);
+    background: rgba(255, 140, 130, 0.07);
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    font-size: 0.9rem;
+  }
+
+  .finished-note {
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 640px) {
+    .matchup-header {
+      grid-template-columns: 1fr;
+      gap: 1rem;
+    }
+
+    .predicted-score {
+      font-size: 2rem;
+    }
+  }
+</style>
+
+<script>
+  import { getFlagUrl } from '../lib/flags';
+  import { stageLabel } from '../lib/stages';
+
+  interface TeamPanelInfo {
+    team_name: string;
+    elo: number;
+    elo_cycle_start: number;
+    avg_goals_scored: number;
+    avg_goals_conceded: number;
+    matches_played: number;
+    wins: number;
+    draws: number;
+    losses: number;
+    form_last_five: string;
+    form_trend: string;
+    data_source: string;
+    flag: string | null;
+  }
+
+  interface SidebarMatch {
+    id: number;
+    date: string;
+    home_team: string;
+    away_team: string;
+    home_score: number | null;
+    away_score: number | null;
+    status: 'pending' | 'awaiting_teams' | 'finished';
+    group_name: string | null;
+    matchday: number | null;
+    stage: string;
+    has_cache: boolean;
+  }
+
+  interface Prediction {
+    probabilidades: {
+      victoria_local: number;
+      empate: number;
+      victoria_visitante: number;
+    };
+    marcador_exacto: string;
+    ganador_esperado: string;
+    nivel_certeza: 'ALTA' | 'MEDIA' | 'BAJA';
+    analisis: string;
+    desglose_consenso: {
+      simulacion_poisson: string;
+      diferencial_elo: string;
+      momento_forma_xg: string;
+    };
+  }
+
+  const appData = JSON.parse(document.getElementById('app-data')!.textContent ?? '{}') as {
+    teams: Record<string, TeamPanelInfo>;
+    matches: SidebarMatch[];
+  };
+
+  const matchesById = new Map(appData.matches.map((match) => [match.id, match]));
+  const emptyState = document.getElementById('empty-state') as HTMLDivElement;
+  const analysisView = document.getElementById('analysis-view') as HTMLDivElement;
+  const mainView = document.getElementById('main-view') as HTMLElement;
+
+  function escapeHtml(value: string): string {
+    const div = document.createElement('div');
+    div.textContent = value;
+    return div.innerHTML;
+  }
+
+  function flagMarkup(team: TeamPanelInfo | undefined, name: string): string {
+    const flagUrl = team?.flag ?? getFlagUrl(name, 160);
+    if (flagUrl) {
+      return `<img class="flag-large" src="${escapeHtml(flagUrl)}" alt="Bandera de ${escapeHtml(name)}" />`;
+    }
+    return `<div class="flag-placeholder">${escapeHtml(name.slice(0, 2).toUpperCase())}</div>`;
+  }
+
+  function headerMarkup(match: SidebarMatch, centerHtml: string): string {
+    const home = appData.teams[match.home_team];
+    const away = appData.teams[match.away_team];
+    return `
+      <header class="matchup-header">
+        <div class="team-side">
+          ${flagMarkup(home, match.home_team)}
+          <h3>${escapeHtml(match.home_team)}</h3>
+        </div>
+        <div class="center-block">${centerHtml}</div>
+        <div class="team-side">
+          ${flagMarkup(away, match.away_team)}
+          <h3>${escapeHtml(match.away_team)}</h3>
+        </div>
+      </header>
+    `;
+  }
+
+  function probBarMarkup(match: SidebarMatch, prediction: Prediction): string {
+    const { victoria_local, empate, victoria_visitante } = prediction.probabilidades;
+    const segment = (kind: string, value: number, label: string): string =>
+      `<div class="prob-segment ${kind}" style="width:${value}%" title="${escapeHtml(label)}: ${value}%">${value >= 12 ? `${value}%` : ''}</div>`;
+
+    return `
+      <h4 class="section-title">Probabilidades del consenso</h4>
+      <div class="prob-bar">
+        ${segment('home', victoria_local, `Victoria ${match.home_team}`)}
+        ${segment('draw', empate, 'Empate')}
+        ${segment('away', victoria_visitante, `Victoria ${match.away_team}`)}
+      </div>
+      <div class="prob-legend">
+        <span class="legend-item"><span class="legend-swatch home"></span>${escapeHtml(match.home_team)} ${victoria_local}%</span>
+        <span class="legend-item"><span class="legend-swatch draw"></span>Empate ${empate}%</span>
+        <span class="legend-item"><span class="legend-swatch away"></span>${escapeHtml(match.away_team)} ${victoria_visitante}%</span>
+      </div>
+    `;
+  }
+
+  function statsRow(
+    label: string,
+    homeValue: string,
+    awayValue: string,
+    leader: 'home' | 'away' | null
+  ): string {
+    return `
+      <tr>
+        <td class="value ${leader === 'home' ? 'leading' : ''}">${escapeHtml(homeValue)}</td>
+        <td class="metric-label">${escapeHtml(label)}</td>
+        <td class="value ${leader === 'away' ? 'leading' : ''}">${escapeHtml(awayValue)}</td>
+      </tr>
+    `;
+  }
+
+  function numericLeader(home: number, away: number, higherWins: boolean): 'home' | 'away' | null {
+    if (home === away) {
+      return null;
+    }
+    const homeLeads = higherWins ? home > away : home < away;
+    return homeLeads ? 'home' : 'away';
+  }
+
+  function statsTableMarkup(match: SidebarMatch): string {
+    const home = appData.teams[match.home_team];
+    const away = appData.teams[match.away_team];
+
+    if (!home || !away) {
+      return '';
+    }
+
+    const sourceLabel = home.data_source === 'real' && away.data_source === 'real'
+      ? 'Datos reales del ciclo 2022–2026'
+      : 'Datos del ciclo 2022–2026';
+
+    return `
+      <h4 class="section-title">Cara a cara · ${escapeHtml(sourceLabel)}</h4>
+      <table class="stats-table">
+        <tbody>
+          ${statsRow('Elo actual', String(home.elo), String(away.elo), numericLeader(home.elo, away.elo, true))}
+          ${statsRow('Elo inicio de ciclo', String(home.elo_cycle_start), String(away.elo_cycle_start), numericLeader(home.elo_cycle_start, away.elo_cycle_start, true))}
+          ${statsRow('Partidos jugados', String(home.matches_played), String(away.matches_played), null)}
+          ${statsRow('Récord V-E-D', `${home.wins}-${home.draws}-${home.losses}`, `${away.wins}-${away.draws}-${away.losses}`, numericLeader(home.wins, away.wins, true))}
+          ${statsRow('Goles a favor / partido', home.avg_goals_scored.toFixed(2), away.avg_goals_scored.toFixed(2), numericLeader(home.avg_goals_scored, away.avg_goals_scored, true))}
+          ${statsRow('Goles en contra / partido', home.avg_goals_conceded.toFixed(2), away.avg_goals_conceded.toFixed(2), numericLeader(home.avg_goals_conceded, away.avg_goals_conceded, false))}
+          ${statsRow('Forma (últimos 5)', home.form_last_five, away.form_last_five, null)}
+          ${statsRow('Tendencia', home.form_trend, away.form_trend, null)}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function predictionMarkup(match: SidebarMatch, prediction: Prediction, cached: boolean): string {
+    const center = `
+      <span class="score-caption">Marcador predicho</span>
+      <span class="predicted-score">${escapeHtml(prediction.marcador_exacto.replace('-', ' – '))}</span>
+      <div class="meta-chips">
+        <span class="chip">Ganador: ${escapeHtml(prediction.ganador_esperado)}</span>
+        <span class="chip certainty-${escapeHtml(prediction.nivel_certeza)}">Certeza ${escapeHtml(prediction.nivel_certeza)}</span>
+        <span class="chip">${cached ? 'Instantáneo · caché' : 'Recién generado'}</span>
+      </div>
+    `;
+
+    return `
+      ${headerMarkup(match, center)}
+      ${probBarMarkup(match, prediction)}
+      ${statsTableMarkup(match)}
+      <h4 class="section-title">Síntesis del consenso</h4>
+      <p class="analysis-block">${escapeHtml(prediction.analisis)}</p>
+      <h4 class="section-title">Desglose por metodología</h4>
+      <ul class="consensus-list">
+        <li><strong>Simulación de Poisson</strong>${escapeHtml(prediction.desglose_consenso.simulacion_poisson)}</li>
+        <li><strong>Diferencial Elo</strong>${escapeHtml(prediction.desglose_consenso.diferencial_elo)}</li>
+        <li><strong>Momento de Forma / xG</strong>${escapeHtml(prediction.desglose_consenso.momento_forma_xg)}</li>
+      </ul>
+    `;
+  }
+
+  function awaitingMarkup(match: SidebarMatch): string {
+    const center = `
+      <span class="score-caption">${escapeHtml(stageLabel(match.stage))}</span>
+      <span class="predicted-score">VS</span>
+      <div class="meta-chips"><span class="chip">Llave pendiente por definir</span></div>
+    `;
+
+    return `
+      ${headerMarkup(match, center)}
+      <p class="finished-note">Las selecciones de esta llave aún no están definidas. Cuando se resuelva la fase previa y ambos equipos sean reales, la predicción con IA se habilitará automáticamente.</p>
+    `;
+  }
+
+  function finishedMarkup(match: SidebarMatch): string {
+    const center = `
+      <span class="score-caption">Resultado final</span>
+      <span class="predicted-score">${match.home_score} – ${match.away_score}</span>
+      <div class="meta-chips"><span class="chip">Partido finalizado</span></div>
+    `;
+
+    return `
+      ${headerMarkup(match, center)}
+      ${statsTableMarkup(match)}
+      <p class="finished-note">Este partido ya terminó: se muestra el resultado oficial y el cara a cara del ciclo.</p>
+    `;
+  }
+
+  function showAnalysis(html: string): void {
+    emptyState.hidden = true;
+    analysisView.hidden = false;
+    analysisView.innerHTML = html;
+    mainView.scrollTop = 0;
+  }
+
+  function showLoading(match: SidebarMatch): void {
+    showAnalysis(`
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <p>Ejecutando motor determinista y consenso para ${escapeHtml(match.home_team)} vs ${escapeHtml(match.away_team)}…</p>
+      </div>
+    `);
+  }
+
+  async function selectMatch(matchId: number): Promise<void> {
+    const match = matchesById.get(matchId);
+
+    if (!match) {
+      return;
+    }
+
+    document.querySelectorAll('.match-item.selected').forEach((item) => item.classList.remove('selected'));
+    document.querySelector(`.match-item[data-match-id="${matchId}"]`)?.classList.add('selected');
+
+    if (match.status === 'finished') {
+      showAnalysis(finishedMarkup(match));
+      return;
+    }
+
+    if (match.status === 'awaiting_teams') {
+      showAnalysis(awaitingMarkup(match));
+      return;
+    }
+
+    showLoading(match);
+
+    try {
+      const response = await fetch('/api/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ matchId })
+      });
+
+      const payload = await response.json();
+
+      if (!response.ok) {
+        showAnalysis(`<div class="analysis-error">${escapeHtml(payload?.error ?? 'No fue posible generar la predicción.')}</div>`);
+        return;
+      }
+
+      showAnalysis(predictionMarkup(match, payload.prediction as Prediction, Boolean(payload.cached)));
+    } catch {
+      showAnalysis('<div class="analysis-error">Error de red al solicitar la predicción.</div>');
+    }
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('.match-item').forEach((button) => {
+    button.addEventListener('click', () => {
+      void selectMatch(Number(button.dataset.matchId));
+    });
+  });
+</script>
