@@ -706,8 +706,17 @@ const clientPayload = {
 
   @media (max-width: 640px) {
     .matchup-header {
-      grid-template-columns: 1fr;
-      gap: 1rem;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 0.5rem;
+    }
+    
+    .flag-large, .flag-placeholder {
+      width: 56px;
+      height: 56px;
+    }
+    
+    .team-side h3 {
+      font-size: 0.85rem;
     }
 
     .predicted-score {
