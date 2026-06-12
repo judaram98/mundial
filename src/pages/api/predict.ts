@@ -8,6 +8,7 @@ import {
 } from '../../lib/prediction-engine';
 import type { Prediction, PredictionCache } from '../../lib/prediction-types';
 import { isPlaceholderMatch } from '../../lib/placeholders';
+import { buildTournamentFeedback } from '../../lib/feedback-loop';
 
 export const prerender = false;
 
@@ -62,6 +63,24 @@ Responde estrictamente con un objeto JSON válido con esta estructura exacta, si
     "momento_forma_xg": "<conclusión textual basada en sus números>"
   }
 }`;
+
+function composeSystemPrompt(tournamentFeedback: string | null): string {
+  if (!tournamentFeedback) {
+    return SYSTEM_PROMPT;
+  }
+
+  return `${SYSTEM_PROMPT}
+
+[AUTO-CORRECCIÓN Y CONTEXTO DEL TORNEO]
+Lecciones verificadas de partidos ya finalizados en este Mundial que involucran a los equipos de este encuentro:
+${tournamentFeedback}
+
+Instrucciones de auto-corrección (obligatorias, subordinadas a las reglas anteriores):
+- Antes de emitir el consenso y el marcador, DEBES penalizar o bonificar tu valoración cualitativa de los atributos de ataque y defensa de cada equipo según estas lecciones: reduce la confianza en el resultado favorecido cuando la lección demuestre que la IA sobreestimó a ese equipo, y auméntala cuando lo subestimó.
+- El ajuste se materializa en cómo ponderas las tres metodologías entre sí, en los enteros finales de probabilidades y en el nivel_certeza; sigue siendo ilegal recalcular, corregir o contradecir los números deterministas recibidos.
+- La REGLA DE EMPATE OBLIGATORIO y las reglas de salida obligatorias conservan prioridad absoluta sobre esta sección.
+- El campo analisis debe citar explícitamente qué lección aplicaste y cómo modificó tu ponderación respecto a un análisis sin historial.`;
+}
 
 function parseStructure(value: unknown): Prediction | null {
   if (typeof value !== 'object' || value === null) {
@@ -147,10 +166,12 @@ function enforceMandatoryDraw(prediction: Prediction): Prediction {
 export async function requestConsensus(
   matchContext: Record<string, unknown>,
   homeTeam: string,
-  awayTeam: string
+  awayTeam: string,
+  tournamentFeedback: string | null = null
 ): Promise<{ prediction: Prediction | null; failure: string | null }> {
   const report = matchContext.calculos_deterministas as DeterministicReport;
   const drawMandatory = Boolean(report?.regla_empate?.empate_obligatorio);
+  const systemPrompt = composeSystemPrompt(tournamentFeedback);
   let failure: string | null = null;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
@@ -163,7 +184,7 @@ export async function requestConsensus(
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         {
           role: 'user',
           content: `Genera el consenso y la síntesis en formato JSON para este partido:\n${JSON.stringify(matchContext)}${feedback}`
@@ -318,11 +339,17 @@ export const POST: APIRoute = async ({ request }) => {
     calculos_deterministas: deterministicReport
   };
 
+  const tournamentFeedback = await buildTournamentFeedback(
+    match.home_team,
+    match.away_team
+  ).catch(() => null);
+
   try {
     const { prediction, failure } = await requestConsensus(
       matchContext,
       match.home_team,
-      match.away_team
+      match.away_team,
+      tournamentFeedback
     );
 
     if (!prediction) {

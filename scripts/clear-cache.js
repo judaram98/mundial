@@ -10,20 +10,46 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-async function clearCache() {
-  console.log('Iniciando limpieza de la caché de predicciones...');
-
-  const { data, error } = await supabase
+async function countPreservedCaches() {
+  const { count, error } = await supabase
     .from('matches')
-    .update({ prediction_cache: null })
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'finished')
     .not('prediction_cache', 'is', null);
 
   if (error) {
-    console.error('Error al limpiar la caché:', error.message);
-    process.exit(1);
+    throw new Error(`Error al contar las predicciones preservadas: ${error.message}`);
   }
 
-  console.log('Caché de predicciones limpiada exitosamente para todos los partidos.');
+  return count ?? 0;
 }
 
-clearCache();
+async function clearPendingCaches() {
+  const { data, error } = await supabase
+    .from('matches')
+    .update({ prediction_cache: null })
+    .neq('status', 'finished')
+    .not('prediction_cache', 'is', null)
+    .select('id');
+
+  if (error) {
+    throw new Error(`Error al limpiar la caché: ${error.message}`);
+  }
+
+  return data?.length ?? 0;
+}
+
+async function clearCache() {
+  console.log('Iniciando limpieza selectiva de la caché de predicciones...');
+
+  const preserved = await countPreservedCaches();
+  const cleared = await clearPendingCaches();
+
+  console.log(`Partidos limpiados: ${cleared} (status distinto de 'finished', volverán a predecirse con el bucle de retroalimentación).`);
+  console.log(`Partidos preservados: ${preserved} (finalizados, conservan su prediction_cache para el historial de aciertos).`);
+}
+
+clearCache().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});

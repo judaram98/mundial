@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { buildDeterministicReport } from '../src/lib/prediction-engine.js';
 import { requestConsensus } from '../src/pages/api/predict.js';
+import { buildTournamentFeedback } from '../src/lib/feedback-loop.js';
 
 const supabaseUrl = process.env.PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -36,7 +37,6 @@ async function precompute() {
 
   console.log(`Iniciando precomputación para ${matches.length} partidos...`);
 
-  // Precargar todas las estadísticas para evitar peticiones redundantes
   const { data: stats, error: statsError } = await supabase.from('team_stats').select('*');
 
   if (statsError || !stats) {
@@ -79,11 +79,21 @@ async function precompute() {
       calculos_deterministas: deterministicReport
     };
 
+    const tournamentFeedback = await buildTournamentFeedback(
+      match.home_team,
+      match.away_team
+    ).catch(() => null);
+
+    if (tournamentFeedback) {
+      console.log(`↺ Lecciones del torneo aplicadas al partido ${match.id}.`);
+    }
+
     try {
       const { prediction, failure } = await requestConsensus(
         matchContext,
         match.home_team,
-        match.away_team
+        match.away_team,
+        tournamentFeedback
       );
 
       if (!prediction) {

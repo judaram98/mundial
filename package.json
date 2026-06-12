@@ -7,6 +7,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "seed": "node --env-file=.env scripts/seed.js",
+    "set-result": "node --env-file=.env scripts/set-match-result.js",
     "map-teams": "node --env-file=.env scripts/map-teams.js",
     "ingest": "node --env-file=.env --import tsx scripts/ingest-real-data.js",
     "clear-cache": "node --env-file=.env scripts/clear-cache.js",
