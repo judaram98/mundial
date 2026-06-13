@@ -1,8 +1,9 @@
 import { supabase } from './supabase';
-import { evaluatePrediction, type MatchOutcome, type PredictionVerdict } from './accuracy';
+import { evaluatePrediction, type PredictionVerdict } from './accuracy';
 import type { PredictionCache } from './prediction-types';
 
-const MAX_LESSONS_PER_TEAM = 3;
+const MIN_MATCHES_FOR_BIAS = 3;
+const BIAS_GOAL_THRESHOLD = 0.5;
 
 interface FinishedMatch {
   date: string;
@@ -14,28 +15,27 @@ interface FinishedMatch {
   prediction_cache: PredictionCache | null;
 }
 
+interface TeamSample {
+  header: string;
+  predictedScore: string;
+  hit: boolean;
+  attackDelta: number;
+  defenseDelta: number;
+}
+
 export async function buildTournamentFeedback(
   homeTeam: string,
   awayTeam: string
 ): Promise<string | null> {
   const finishedMatches = await fetchFinishedMatches();
-  const seen = new Set<string>();
   const lessons: string[] = [];
 
   for (const team of [homeTeam, awayTeam]) {
-    for (const match of relevantMatchesFor(team, finishedMatches)) {
-      const key = `${match.date}|${match.home_team}|${match.away_team}`;
+    const samples = collectTeamSamples(team, finishedMatches);
+    const lesson = describeTeamLesson(team, samples);
 
-      if (seen.has(key)) {
-        continue;
-      }
-
-      const lesson = describeLesson(team, match);
-
-      if (lesson) {
-        seen.add(key);
-        lessons.push(`- ${lesson}`);
-      }
+    if (lesson) {
+      lessons.push(`- ${lesson}`);
     }
   }
 
@@ -56,82 +56,112 @@ async function fetchFinishedMatches(): Promise<FinishedMatch[]> {
   return (data ?? []) as FinishedMatch[];
 }
 
-function relevantMatchesFor(team: string, matches: FinishedMatch[]): FinishedMatch[] {
-  return matches
-    .filter((match) => match.home_team === team || match.away_team === team)
-    .slice(0, MAX_LESSONS_PER_TEAM);
+function collectTeamSamples(team: string, matches: FinishedMatch[]): TeamSample[] {
+  const samples: TeamSample[] = [];
+
+  for (const match of matches) {
+    if (match.home_team !== team && match.away_team !== team) {
+      continue;
+    }
+
+    const verdict = evaluatePrediction(match);
+
+    if (!verdict) {
+      continue;
+    }
+
+    samples.push(buildSample(team, match, verdict));
+  }
+
+  return samples;
 }
 
-function describeLesson(team: string, match: FinishedMatch): string | null {
-  const verdict = evaluatePrediction(match);
+function buildSample(team: string, match: FinishedMatch, verdict: PredictionVerdict): TeamSample {
+  const isHome = match.home_team === team;
+  const realFor = (isHome ? match.home_score : match.away_score) ?? 0;
+  const realAgainst = (isHome ? match.away_score : match.home_score) ?? 0;
+  const predictedFor = isHome ? verdict.predicted_home : verdict.predicted_away;
+  const predictedAgainst = isHome ? verdict.predicted_away : verdict.predicted_home;
 
-  if (!verdict) {
+  return {
+    header: `${match.home_team} ${match.home_score}-${match.away_score} ${match.away_team}`,
+    predictedScore: `${verdict.predicted_home}-${verdict.predicted_away}`,
+    hit: verdict.hit,
+    attackDelta: predictedFor - realFor,
+    defenseDelta: predictedAgainst - realAgainst
+  };
+}
+
+function describeTeamLesson(team: string, samples: TeamSample[]): string | null {
+  if (samples.length === 0) {
     return null;
   }
 
-  const realScore = `${match.home_score}-${match.away_score}`;
-  const predictedScore = `${verdict.predicted_home}-${verdict.predicted_away}`;
-  const header = `${match.home_team} ${realScore} ${match.away_team}`;
-
-  if (verdict.hit && realScore === predictedScore) {
-    return `Acierto pleno previo: en ${header}, la IA predijo exactamente ${predictedScore}. La calibración de ataque y defensa aplicada a ${team} quedó validada: consérvala.`;
+  if (samples.length < MIN_MATCHES_FOR_BIAS) {
+    return describeInformativeContext(team, samples);
   }
 
-  if (verdict.hit) {
-    return `Acierto parcial previo: en ${header}, la IA acertó el ganador (${outcomeLabel(verdict.real_outcome, match)}) pero predijo ${predictedScore}. ${describeBias(match, verdict)} Afina la magnitud ofensiva/defensiva estimada para ${team} sin cambiar la dirección del juicio.`;
-  }
-
-  return `Diagnóstico de Error Previo: en ${header}, la IA predijo ${predictedScore} (${outcomeLabel(verdict.predicted_outcome, match)}), pero el resultado real fue ${outcomeLabel(verdict.real_outcome, match)}. ${describeBias(match, verdict)} Ajusta tus pesos lógicos para no repetir este sesgo en el análisis de ${team}.`;
+  return describeAggregatedDiagnosis(team, samples);
 }
 
-function outcomeLabel(outcome: MatchOutcome, match: FinishedMatch): string {
-  if (outcome === 'home') {
-    return `victoria de ${match.home_team}`;
-  }
+function describeInformativeContext(team: string, samples: TeamSample[]): string {
+  const matchCount = samples.length === 1 ? '1 partido' : `${samples.length} partidos`;
+  const summary = samples
+    .map((sample) => `${sample.header} (la IA predijo ${sample.predictedScore})`)
+    .join('; ');
 
-  if (outcome === 'away') {
-    return `victoria de ${match.away_team}`;
-  }
-
-  return 'empate';
+  return `Contexto informativo de ${team} (muestra insuficiente: ${matchCount} finalizados): ${summary}. NO ajustes pesos, probabilidades ni nivel_certeza con esta muestra; úsala solo como referencia descriptiva.`;
 }
 
-function goalCount(goals: number): string {
-  return goals === 1 ? '1 gol' : `${goals} goles`;
+function describeAggregatedDiagnosis(team: string, samples: TeamSample[]): string {
+  const total = samples.length;
+  const hits = samples.filter((sample) => sample.hit).length;
+  const avgAttackDelta = average(samples.map((sample) => sample.attackDelta));
+  const avgDefenseDelta = average(samples.map((sample) => sample.defenseDelta));
+
+  const parts = [
+    `Diagnóstico acumulado de ${team} (${total} partidos finalizados): la IA acertó el ganador en ${hits} de ${total}.`,
+    describeAttackBias(team, avgAttackDelta),
+    describeDefenseBias(team, avgDefenseDelta),
+    `Ajusta tu ponderación cualitativa de ${team} únicamente conforme a este patrón agregado.`
+  ];
+
+  return parts.join(' ');
 }
 
-function describeBias(match: FinishedMatch, verdict: PredictionVerdict): string {
-  const findings: string[] = [];
-  const homeDelta = verdict.predicted_home - (match.home_score ?? 0);
-  const awayDelta = verdict.predicted_away - (match.away_score ?? 0);
+function describeAttackBias(team: string, avgDelta: number): string {
+  const magnitude = formatGoals(Math.abs(avgDelta));
 
-  if (homeDelta > 0) {
-    findings.push(
-      `sobreestimó el poder ofensivo de ${match.home_team} y subestimó la defensa de ${match.away_team} (esperaba ${goalCount(verdict.predicted_home)} del local y marcó ${match.home_score})`
-    );
+  if (avgDelta >= BIAS_GOAL_THRESHOLD) {
+    return `En promedio sobreestimó la producción ofensiva de ${team} en ${magnitude} por partido.`;
   }
 
-  if (homeDelta < 0) {
-    findings.push(
-      `subestimó el poder ofensivo de ${match.home_team} y sobreestimó la defensa de ${match.away_team} (esperaba ${goalCount(verdict.predicted_home)} del local y marcó ${match.home_score})`
-    );
+  if (avgDelta <= -BIAS_GOAL_THRESHOLD) {
+    return `En promedio subestimó la producción ofensiva de ${team} en ${magnitude} por partido.`;
   }
 
-  if (awayDelta > 0) {
-    findings.push(
-      `sobreestimó el poder ofensivo de ${match.away_team} y subestimó la defensa de ${match.home_team} (esperaba ${goalCount(verdict.predicted_away)} del visitante y marcó ${match.away_score})`
-    );
+  return `Su producción ofensiva está bien calibrada (desvío medio de ${formatGoals(avgDelta)}).`;
+}
+
+function describeDefenseBias(team: string, avgDelta: number): string {
+  const magnitude = formatGoals(Math.abs(avgDelta));
+
+  if (avgDelta >= BIAS_GOAL_THRESHOLD) {
+    return `Su defensa rindió mejor de lo previsto: la IA esperaba ${magnitude} más en contra por partido.`;
   }
 
-  if (awayDelta < 0) {
-    findings.push(
-      `subestimó el poder ofensivo de ${match.away_team} y sobreestimó la defensa de ${match.home_team} (esperaba ${goalCount(verdict.predicted_away)} del visitante y marcó ${match.away_score})`
-    );
+  if (avgDelta <= -BIAS_GOAL_THRESHOLD) {
+    return `Su defensa rindió peor de lo previsto: la IA esperaba ${magnitude} menos en contra por partido.`;
   }
 
-  if (findings.length === 0) {
-    return 'La calibración ofensiva y defensiva fue exacta en ambos lados.';
-  }
+  return `Su rendimiento defensivo está bien calibrado (desvío medio de ${formatGoals(avgDelta)}).`;
+}
 
-  return `La IA ${findings.join('; además, ')}.`;
+function average(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function formatGoals(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  return `${rounded} ${Math.abs(rounded) === 1 ? 'gol' : 'goles'}`;
 }

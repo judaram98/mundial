@@ -39,21 +39,19 @@ export interface PoissonModel {
 export interface EloModel {
   elo_local: number;
   elo_visitante: number;
+  bonus_localia: number;
+  elo_local_efectivo: number;
   diferencia: number;
   expectativa_local: number;
   delta_ciclo_local: number;
   delta_ciclo_visitante: number;
-  paridad_tecnica: boolean;
   probabilidades: ThreeWayProbabilities;
 }
 
-export interface DrawRule {
-  paridad_tecnica: boolean;
-  diferencia_elo_absoluta: number;
-  umbral_paridad_elo: number;
-  probabilidad_empate_poisson: number;
-  umbral_probabilidad_empate: number;
-  empate_obligatorio: boolean;
+export interface MarketConsensus {
+  probabilidades: ThreeWayProbabilities;
+  ganador_argmax: string;
+  marcador_argmax: string;
 }
 
 export interface FormXgTeamPanel {
@@ -75,15 +73,19 @@ export interface DeterministicReport {
   simulacion_poisson: PoissonModel;
   diferencial_elo: EloModel;
   momento_forma_xg: FormXgModel;
-  regla_empate: DrawRule;
+  mercado_1x2: MarketConsensus;
 }
 
-export const ELO_PARITY_THRESHOLD = 60;
-export const POISSON_DRAW_THRESHOLD = 23;
+export const HOST_TEAMS = new Set(['México', 'Estados Unidos', 'Canadá']);
+export const HOST_ELO_BONUS = 80;
+export const REFERENCE_ELO = 1600;
+export const MIN_OUTCOME_SHARE = 0.05;
 
 const MAX_GOALS = 10;
 const MIN_LAMBDA = 0.05;
 const MAX_DRAW_ANCHOR = 0.6;
+const MIN_QUALITY_FACTOR = 0.5;
+const MAX_QUALITY_FACTOR = 1.5;
 const FORM_BALANCE_THRESHOLD = 0.15;
 const FORM_WEIGHTS = [1, 1.25, 1.5, 1.75, 2];
 const FORM_POINTS: Record<string, number> = { W: 3, D: 1, L: 0 };
@@ -91,6 +93,10 @@ const FORM_POINTS: Record<string, number> = { W: 3, D: 1, L: 0 };
 function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function poissonPmf(lambda: number, k: number): number {
@@ -125,9 +131,59 @@ function toPercentages(home: number, draw: number, away: number): ThreeWayProbab
   };
 }
 
-export function buildPoissonModel(home: TeamStats, away: TeamStats): PoissonModel {
-  const lambdaHome = Math.max(MIN_LAMBDA, (home.avg_goals_scored + away.avg_goals_conceded) / 2);
-  const lambdaAway = Math.max(MIN_LAMBDA, (away.avg_goals_scored + home.avg_goals_conceded) / 2);
+function smoothedPercentages(home: number, draw: number, away: number): ThreeWayProbabilities {
+  const total = home + draw + away;
+  const shares = total > 0 ? [home / total, draw / total, away / total] : [1 / 3, 1 / 3, 1 / 3];
+  const scale = 1 - 3 * MIN_OUTCOME_SHARE;
+  const smoothed = shares.map((share) => MIN_OUTCOME_SHARE + scale * share);
+  return toPercentages(smoothed[0], smoothed[1], smoothed[2]);
+}
+
+export function hostEloBonus(team: TeamStats): number {
+  return HOST_TEAMS.has(team.team_name) ? HOST_ELO_BONUS : 0;
+}
+
+function rivalAdjustedLambda(
+  attackAverage: number,
+  concessionAverage: number,
+  attackerElo: number,
+  defenderElo: number
+): number {
+  const rivalStrengthFactor = clamp(
+    REFERENCE_ELO / defenderElo,
+    MIN_QUALITY_FACTOR,
+    MAX_QUALITY_FACTOR
+  );
+  const attackerQualityFactor = clamp(
+    attackerElo / REFERENCE_ELO,
+    MIN_QUALITY_FACTOR,
+    MAX_QUALITY_FACTOR
+  );
+
+  return Math.max(
+    MIN_LAMBDA,
+    (attackAverage * rivalStrengthFactor + concessionAverage * attackerQualityFactor) / 2
+  );
+}
+
+export function buildPoissonModel(
+  home: TeamStats,
+  away: TeamStats,
+  homeEffectiveElo: number = home.elo,
+  awayEffectiveElo: number = away.elo
+): PoissonModel {
+  const lambdaHome = rivalAdjustedLambda(
+    home.avg_goals_scored,
+    away.avg_goals_conceded,
+    homeEffectiveElo,
+    awayEffectiveElo
+  );
+  const lambdaAway = rivalAdjustedLambda(
+    away.avg_goals_scored,
+    home.avg_goals_conceded,
+    awayEffectiveElo,
+    homeEffectiveElo
+  );
 
   let homeWin = 0;
   let draw = 0;
@@ -135,7 +191,7 @@ export function buildPoissonModel(home: TeamStats, away: TeamStats): PoissonMode
   let totalMass = 0;
   let bestScore = '0-0';
   let bestCell = 0;
-  
+
   let bestHomeWinScore = '1-0';
   let bestHomeWinCell = 0;
   let bestDrawScore = '0-0';
@@ -188,35 +244,63 @@ export function buildPoissonModel(home: TeamStats, away: TeamStats): PoissonMode
   };
 }
 
-export function buildEloModel(home: TeamStats, away: TeamStats, drawAnchor: number): EloModel {
-  const difference = home.elo - away.elo;
+export function buildEloModel(
+  home: TeamStats,
+  away: TeamStats,
+  drawAnchor: number,
+  hostBonus: number = hostEloBonus(home)
+): EloModel {
+  const effectiveHomeElo = home.elo + hostBonus;
+  const difference = effectiveHomeElo - away.elo;
   const expectation = 1 / (1 + 10 ** (-difference / 400));
-  const draw = Math.min(Math.max(drawAnchor, 0), MAX_DRAW_ANCHOR);
+  const draw = clamp(drawAnchor, 0, MAX_DRAW_ANCHOR);
   const homeWin = Math.max(0, expectation - draw / 2);
   const awayWin = Math.max(0, 1 - expectation - draw / 2);
 
   return {
     elo_local: home.elo,
     elo_visitante: away.elo,
+    bonus_localia: hostBonus,
+    elo_local_efectivo: effectiveHomeElo,
     diferencia: difference,
     expectativa_local: roundTo(expectation, 4),
     delta_ciclo_local: home.elo - home.elo_cycle_start,
     delta_ciclo_visitante: away.elo - away.elo_cycle_start,
-    paridad_tecnica: Math.abs(difference) < ELO_PARITY_THRESHOLD,
-    probabilidades: toPercentages(homeWin, draw, awayWin)
+    probabilidades: smoothedPercentages(homeWin, draw, awayWin)
   };
 }
 
-export function buildDrawRule(poisson: PoissonModel, elo: EloModel): DrawRule {
-  const drawProbability = poisson.probabilidades.empate;
+export function buildMarketConsensus(
+  poisson: PoissonModel,
+  elo: EloModel,
+  home: TeamStats,
+  away: TeamStats
+): MarketConsensus {
+  const probabilidades = toPercentages(
+    poisson.probabilidades.victoria_local + elo.probabilidades.victoria_local,
+    poisson.probabilidades.empate + elo.probabilidades.empate,
+    poisson.probabilidades.victoria_visitante + elo.probabilidades.victoria_visitante
+  );
+
+  const { victoria_local, empate, victoria_visitante } = probabilidades;
+  const drawIsStrictMax = empate > victoria_local && empate > victoria_visitante;
+  const ganadorArgmax = drawIsStrictMax
+    ? 'Empate'
+    : victoria_local >= victoria_visitante
+      ? home.team_name
+      : away.team_name;
+
+  const marcadorArgmax =
+    ganadorArgmax === 'Empate'
+      ? poisson.mejores_marcadores.empate
+      : ganadorArgmax === home.team_name
+        ? poisson.mejores_marcadores.victoria_local
+        : poisson.mejores_marcadores.victoria_visitante;
 
   return {
-    paridad_tecnica: elo.paridad_tecnica,
-    diferencia_elo_absoluta: Math.abs(elo.diferencia),
-    umbral_paridad_elo: ELO_PARITY_THRESHOLD,
-    probabilidad_empate_poisson: drawProbability,
-    umbral_probabilidad_empate: POISSON_DRAW_THRESHOLD,
-    empate_obligatorio: elo.paridad_tecnica && drawProbability > POISSON_DRAW_THRESHOLD
+    probabilidades,
+    ganador_argmax: ganadorArgmax,
+    marcador_argmax: marcadorArgmax
   };
 }
 
@@ -271,17 +355,20 @@ export function buildFormXgModel(home: TeamStats, away: TeamStats): FormXgModel 
 }
 
 export function buildDeterministicReport(home: TeamStats, away: TeamStats): DeterministicReport {
-  const simulacionPoisson = buildPoissonModel(home, away);
+  const hostBonus = hostEloBonus(home);
+  const effectiveHomeElo = home.elo + hostBonus;
+  const simulacionPoisson = buildPoissonModel(home, away, effectiveHomeElo, away.elo);
   const diferencialElo = buildEloModel(
     home,
     away,
-    simulacionPoisson.probabilidades.empate / 100
+    simulacionPoisson.probabilidades.empate / 100,
+    hostBonus
   );
 
   return {
     simulacion_poisson: simulacionPoisson,
     diferencial_elo: diferencialElo,
     momento_forma_xg: buildFormXgModel(home, away),
-    regla_empate: buildDrawRule(simulacionPoisson, diferencialElo)
+    mercado_1x2: buildMarketConsensus(simulacionPoisson, diferencialElo, home, away)
   };
 }

@@ -20,30 +20,28 @@ const openai = new OpenAI({ apiKey });
 
 const MODEL = 'gpt-4o';
 const MAX_ATTEMPTS = 2;
-const SCORE_PATTERN = /^\d{1,2}-\d{1,2}$/;
 
 const SYSTEM_PROMPT = `Eres un motor de consenso y síntesis textual para predicciones de fútbol internacional. NO eres una calculadora: toda la aritmética ya fue ejecutada de forma determinista por el backend y te llega resuelta.
 
-Recibirás un JSON con los datos del partido, las estadísticas del ciclo mundialista de ambos equipos y el bloque calculos_deterministas con los resultados exactos de tres metodologías independientes más una regla de arbitraje del empate:
-1. simulacion_poisson: lambdas de goles esperados, probabilidades de victoria local/empate/victoria visitante derivadas de la matriz de Poisson completa, marcador más probable y su probabilidad.
-2. diferencial_elo: diferencia de Elo, expectativa del local según E = 1/(1 + 10^(-diferencia/400)), variación de Elo de cada equipo durante el ciclo, el indicador paridad_tecnica y probabilidades a tres bandas derivadas.
+Recibirás un JSON con los datos del partido, las estadísticas del ciclo mundialista de ambos equipos y el bloque calculos_deterministas con los resultados exactos de tres metodologías independientes más su combinación de mercado:
+1. simulacion_poisson: lambdas de goles esperados ajustados por la calidad Elo del rival de turno (un promedio goleador contra rivales débiles vale menos contra un rival fuerte), probabilidades de victoria local/empate/victoria visitante derivadas de la matriz de Poisson completa, marcador más probable y su probabilidad.
+2. diferencial_elo: Elo de cada equipo, bonus_localia (los anfitriones México, Estados Unidos y Canadá reciben +80 Elo cuando juegan como locales), elo_local_efectivo, diferencia y expectativa del local según E = 1/(1 + 10^(-diferencia/400)), variación de Elo de cada equipo durante el ciclo y probabilidades a tres bandas suavizadas: ningún resultado puede valer 0%, todos tienen un piso matemático.
 3. momento_forma_xg: por equipo, puntuación de forma ponderada por recencia (0-100), tendencia, delta de finalización (goles reales menos xG a favor), delta defensivo (goles recibidos menos xG en contra), balance de xG y el equipo al que favorece la metodología. El campo xg_disponible indica si hay datos de xG: cuando es false, los deltas y balances de xG llegan como null.
-4. regla_empate: el árbitro determinista del empate. Indica si los equipos están en paridad_tecnica (diferencia de Elo absoluta menor que umbral_paridad_elo), la probabilidad_empate_poisson, el umbral_probabilidad_empate y el veredicto final empate_obligatorio.
+4. mercado_1x2: la combinación determinista del mercado 1X2 (promedio de las probabilidades de Poisson y Elo), con ganador_argmax (el resultado de probabilidad combinada más alta) y marcador_argmax (el marcador de Poisson coherente con ese resultado).
 
 Tienes PROHIBIDO recalcular, corregir o contradecir esos números. Tu única tarea es combinarlos en un consenso final y redactar la síntesis textual.
 
-REGLA DE EMPATE OBLIGATORIO (máxima prioridad, no negociable):
-- Si regla_empate.empate_obligatorio es true, ganador_esperado DEBE ser exactamente la palabra Empate y la probabilidad de empate DEBE ser estrictamente la más alta de las tres. Cualquier otra salida será rechazada por el validador.
-- Para lograrlo, redistribuye los enteros con el mínimo desvío posible respecto a las metodologías hasta que el empate supere al lado más alto (por ejemplo, si Poisson da 37/27/36, una salida válida es 33/35/32).
-- Una ventaja mínima de Elo NUNCA equivale a una victoria: dentro de la banda de paridad técnica los equipos se tratan como iguales y manda el cuadrante de empates de Poisson.
-- Si regla_empate.empate_obligatorio es false, NO fuerces el empate: aplica el consenso normal de las metodologías.
-- Cuando declares Empate por esta regla, el analisis debe explicar la paridad técnica citando la diferencia de Elo y la probabilidad de empate de Poisson recibidas.
+REGLA ARGMAX (máxima prioridad, no negociable):
+- ganador_esperado DEBE ser el resultado cuya probabilidad final entera sea la más alta de las tres. Nunca declares un ganador cuyo entero no sea el máximo.
+- Empate solo puede declararse si su entero es ESTRICTAMENTE mayor que victoria_local y que victoria_visitante. Ante igualdad entre un equipo y el empate, el ganador es el equipo.
+- NUNCA fuerces un empate por paridad percibida entre los equipos: sin superioridad estricta del entero de empate, manda el equipo con mayor probabilidad.
+- Usa mercado_1x2 como ancla del consenso: tus enteros finales deben mantenerse cerca de sus probabilidades combinadas y solo pueden desplazar el argmax respecto a mercado_1x2.ganador_argmax si un Diagnóstico acumulado del torneo lo justifica explícitamente en el analisis.
 
 Reglas de salida obligatorias:
 - victoria_local, empate y victoria_visitante deben ser números ENTEROS que sumen EXACTAMENTE 100, obtenidos ponderando las probabilidades ya calculadas, sin inventar valores alejados de ellas.
-- Si xg_disponible es false, el consenso debe basarse exclusivamente en simulacion_poisson y diferencial_elo, usando la puntuación de forma y la tendencia solo como matiz cualitativo del análisis.
-- ganador_esperado debe ser el nombre exacto de uno de los dos equipos o la palabra Empate, y debe corresponder al resultado con la probabilidad final más alta.
-- nivel_certeza con xg_disponible true: ALTA si las tres metodologías favorecen el mismo resultado, MEDIA si dos coinciden y una difiere, BAJA si hay divergencia significativa. Con xg_disponible false: ALTA si Poisson y Elo coinciden claramente en el mismo ganador, MEDIA si coinciden con margen estrecho, BAJA si divergen. Cuando el empate sea obligatorio por regla_empate, el nivel_certeza se evalúa sobre qué tan claro es el escenario de paridad, no sobre un ganador.
+- Si xg_disponible es false, el consenso debe basarse exclusivamente en simulacion_poisson, diferencial_elo y mercado_1x2, usando la puntuación de forma y la tendencia solo como matiz cualitativo del análisis.
+- ganador_esperado debe ser el nombre exacto de uno de los dos equipos o la palabra Empate.
+- nivel_certeza con xg_disponible true: ALTA si las tres metodologías favorecen el mismo resultado, MEDIA si dos coinciden y una difiere, BAJA si hay divergencia significativa. Con xg_disponible false: ALTA si Poisson y Elo coinciden claramente en el mismo ganador, MEDIA si coinciden con margen estrecho, BAJA si divergen.
 - analisis y desglose_consenso deben citar los números recibidos sin alterarlos; si xg_disponible es false, la entrada momento_forma_xg debe limitarse a la forma reciente y aclarar que no hay datos de xG.
 - Si data_source es simulated, no presentes los valores como hechos históricos verificados.
 
@@ -71,15 +69,14 @@ function composeSystemPrompt(tournamentFeedback: string | null): string {
 
   return `${SYSTEM_PROMPT}
 
-[AUTO-CORRECCIÓN Y CONTEXTO DEL TORNEO]
-Lecciones verificadas de partidos ya finalizados en este Mundial que involucran a los equipos de este encuentro:
+[CONTEXTO DEL TORNEO Y AUTO-CORRECCIÓN]
+Información verificada de partidos ya finalizados en este Mundial que involucran a los equipos de este encuentro:
 ${tournamentFeedback}
 
-Instrucciones de auto-corrección (obligatorias, subordinadas a las reglas anteriores):
-- Antes de emitir el consenso y el marcador, DEBES penalizar o bonificar tu valoración cualitativa de los atributos de ataque y defensa de cada equipo según estas lecciones: reduce la confianza en el resultado favorecido cuando la lección demuestre que la IA sobreestimó a ese equipo, y auméntala cuando lo subestimó.
-- El ajuste se materializa en cómo ponderas las tres metodologías entre sí, en los enteros finales de probabilidades y en el nivel_certeza; sigue siendo ilegal recalcular, corregir o contradecir los números deterministas recibidos.
-- La REGLA DE EMPATE OBLIGATORIO y las reglas de salida obligatorias conservan prioridad absoluta sobre esta sección.
-- El campo analisis debe citar explícitamente qué lección aplicaste y cómo modificó tu ponderación respecto a un análisis sin historial.`;
+Instrucciones de uso del contexto (obligatorias, subordinadas a las reglas anteriores):
+- Las entradas marcadas como "Diagnóstico acumulado" provienen de una muestra suficiente (3 o más partidos finalizados del equipo): aplícalas ajustando tu ponderación cualitativa entre metodologías y el nivel_certeza, y cita en el analisis qué diagnóstico aplicaste y cómo modificó tu ponderación.
+- Las entradas marcadas como "Contexto informativo" provienen de una muestra insuficiente (1 o 2 partidos): tienes PROHIBIDO ajustar pesos, probabilidades o nivel_certeza por ellas; menciónalas a lo sumo como matiz descriptivo del análisis.
+- La REGLA ARGMAX y las reglas de salida obligatorias conservan prioridad absoluta sobre esta sección.`;
 }
 
 function parseStructure(value: unknown): Prediction | null {
@@ -105,12 +102,7 @@ function parseStructure(value: unknown): Prediction | null {
   return isValid ? (value as Prediction) : null;
 }
 
-function validateRules(
-  prediction: Prediction,
-  homeTeam: string,
-  awayTeam: string,
-  drawMandatory: boolean
-): string | null {
+function validateRules(prediction: Prediction, homeTeam: string, awayTeam: string): string | null {
   const { victoria_local, empate, victoria_visitante } = prediction.probabilidades;
   const probabilities = [victoria_local, empate, victoria_visitante];
 
@@ -126,8 +118,11 @@ function validateRules(
     return 'El ganador esperado debe ser uno de los dos equipos o Empate.';
   }
 
-  if (drawMandatory && prediction.ganador_esperado !== 'Empate') {
-    return 'regla_empate.empate_obligatorio es true: el ganador esperado debe ser Empate y la probabilidad de empate debe ser la más alta.';
+  if (
+    prediction.ganador_esperado === 'Empate' &&
+    (empate <= victoria_local || empate <= victoria_visitante)
+  ) {
+    return 'El empate solo puede declararse si su probabilidad es estrictamente mayor que la de ambos equipos.';
   }
 
   const winnerProbability =
@@ -144,25 +139,6 @@ function validateRules(
   return null;
 }
 
-function enforceMandatoryDraw(prediction: Prediction): Prediction {
-  let { victoria_local, empate, victoria_visitante } = prediction.probabilidades;
-
-  while (empate <= Math.max(victoria_local, victoria_visitante)) {
-    if (victoria_local >= victoria_visitante) {
-      victoria_local -= 1;
-    } else {
-      victoria_visitante -= 1;
-    }
-    empate += 1;
-  }
-
-  return {
-    ...prediction,
-    ganador_esperado: 'Empate',
-    probabilidades: { victoria_local, empate, victoria_visitante }
-  };
-}
-
 export async function requestConsensus(
   matchContext: Record<string, unknown>,
   homeTeam: string,
@@ -170,7 +146,6 @@ export async function requestConsensus(
   tournamentFeedback: string | null = null
 ): Promise<{ prediction: Prediction | null; failure: string | null }> {
   const report = matchContext.calculos_deterministas as DeterministicReport;
-  const drawMandatory = Boolean(report?.regla_empate?.empate_obligatorio);
   const systemPrompt = composeSystemPrompt(tournamentFeedback);
   let failure: string | null = null;
 
@@ -208,16 +183,14 @@ export async function requestConsensus(
       continue;
     }
 
-    const parsedPrediction = parseStructure(parsed);
+    const prediction = parseStructure(parsed);
 
-    if (!parsedPrediction) {
+    if (!prediction) {
       failure = 'La respuesta no cumple la estructura exacta requerida.';
       continue;
     }
 
-    const prediction = drawMandatory ? enforceMandatoryDraw(parsedPrediction) : parsedPrediction;
-
-    failure = validateRules(prediction, homeTeam, awayTeam, drawMandatory);
+    failure = validateRules(prediction, homeTeam, awayTeam);
 
     if (!failure) {
       const mejores = report.simulacion_poisson.mejores_marcadores;
