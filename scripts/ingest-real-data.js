@@ -4,6 +4,12 @@ import { createClient } from '@supabase/supabase-js';
 import { createFootballDataProvider } from '../src/lib/ingestion/football-data.ts';
 import { createOpenDataProvider } from '../src/lib/ingestion/open-data.ts';
 import { createEloRatingsProvider, createFbrefApifyProvider } from '../src/lib/ingestion/scrapers.ts';
+import {
+  buildNameMaps,
+  buildGlobalMatches,
+  replayElo,
+  adjustedWeightedAverages
+} from './lib/history-model.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -114,9 +120,14 @@ async function loadTournamentTeamNames() {
   const data = JSON.parse(raw);
   const names = new Set();
 
+  const placeholderPattern = /\dº|Ganador|Perdedor|Grupo/;
+
   for (const match of data.matches) {
-    names.add(match.home_team);
-    names.add(match.away_team);
+    for (const name of [match.home_team, match.away_team]) {
+      if (!placeholderPattern.test(name)) {
+        names.add(name);
+      }
+    }
   }
 
   return [...names].sort((a, b) => a.localeCompare(b, 'es'));
@@ -127,7 +138,7 @@ async function loadTeams() {
 
   const { data, error } = await supabase
     .from('team_stats')
-    .select('team_name, api_football_team_id, fbref_team_id, eloratings_team_name')
+    .select('team_name, api_football_team_id, fbref_team_id, eloratings_team_name, elo_cycle_start')
     .in('team_name', tournamentNames);
 
   if (error) {
@@ -344,15 +355,56 @@ async function ingestFbref(teams) {
   };
 }
 
+async function loadFullHistory() {
+  const rows = [];
+  const pageSize = 1000;
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from('team_match_history')
+      .select('team_name, match_date, opponent, is_home, goals_for, goals_against')
+      .gte('match_date', CYCLE_PERIOD.start)
+      .lte('match_date', CYCLE_PERIOD.end)
+      .order('match_date', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      throw new Error(`Error al leer team_match_history: ${error.message}`);
+    }
+
+    rows.push(...(data ?? []));
+
+    if (!data || data.length < pageSize) {
+      return rows;
+    }
+  }
+}
+
+async function buildOpponentEloLookup(teams) {
+  const { spanishToEnglish, seedByEnglish } = buildNameMaps(teams);
+  const historyRows = await loadFullHistory();
+  const globalMatches = buildGlobalMatches(historyRows, spanishToEnglish);
+  const { opponentEloLookup } = replayElo(globalMatches, seedByEnglish);
+
+  console.log(
+    `[agregados] Replay de Elo sobre ${globalMatches.length} partidos globales para ajustar promedios por calidad de rival.`
+  );
+
+  return { spanishToEnglish, opponentEloLookup };
+}
+
 async function recomputeAggregates(teams) {
   const coverage = new Map();
   const pending = [];
   let updated = 0;
 
+  const { spanishToEnglish, opponentEloLookup } = await buildOpponentEloLookup(teams);
+
   for (const team of teams) {
     const { data, error } = await supabase
       .from('team_match_history')
-      .select('match_date, goals_for, goals_against, xg_for, xg_against, result')
+      .select('match_date, opponent, goals_for, goals_against, xg_for, xg_against, result')
       .eq('team_name', team.team_name)
       .gte('match_date', CYCLE_PERIOD.start)
       .lte('match_date', CYCLE_PERIOD.end)
@@ -371,6 +423,21 @@ async function recomputeAggregates(teams) {
     }
 
     const aggregates = buildAggregates(rows);
+    const englishName = spanishToEnglish.get(team.team_name) ?? team.team_name;
+    const adjusted = adjustedWeightedAverages(
+      rows.map((row) => ({
+        date: row.match_date,
+        goalsFor: Number(row.goals_for),
+        goalsAgainst: Number(row.goals_against),
+        opponentElo: opponentEloLookup.get(`${row.match_date}|${englishName}|${row.opponent}`)
+      })),
+      { halfLifeDays: Infinity, referenceDate: CYCLE_PERIOD.end }
+    );
+
+    if (adjusted) {
+      aggregates.avg_goals_scored = adjusted.avg_goals_scored;
+      aggregates.avg_goals_conceded = adjusted.avg_goals_conceded;
+    }
     const { error: updateError } = await supabase
       .from('team_stats')
       .update({

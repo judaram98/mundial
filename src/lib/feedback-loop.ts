@@ -1,9 +1,25 @@
 import { supabase } from './supabase';
 import { evaluatePrediction, type PredictionVerdict } from './accuracy';
+import type { TeamStats } from './prediction-engine';
 import type { PredictionCache } from './prediction-types';
 
 const MIN_MATCHES_FOR_BIAS = 3;
 const BIAS_GOAL_THRESHOLD = 0.5;
+const CALIBRATION_DAMPING = 0.5;
+const MAX_CALIBRATION_SHIFT = 0.4;
+const MIN_ADJUSTED_AVERAGE = 0.1;
+
+export interface CalibrationAdjustment {
+  attack_shift: number;
+  defense_shift: number;
+  matches: number;
+  hits: number;
+}
+
+export interface TournamentContext {
+  narrative: string | null;
+  adjustments: Map<string, CalibrationAdjustment>;
+}
 
 interface FinishedMatch {
   date: string;
@@ -23,23 +39,56 @@ interface TeamSample {
   defenseDelta: number;
 }
 
-export async function buildTournamentFeedback(
+export async function buildTournamentContext(
   homeTeam: string,
   awayTeam: string
-): Promise<string | null> {
+): Promise<TournamentContext> {
   const finishedMatches = await fetchFinishedMatches();
   const lessons: string[] = [];
+  const adjustments = new Map<string, CalibrationAdjustment>();
 
   for (const team of [homeTeam, awayTeam]) {
     const samples = collectTeamSamples(team, finishedMatches);
-    const lesson = describeTeamLesson(team, samples);
 
-    if (lesson) {
-      lessons.push(`- ${lesson}`);
+    if (samples.length === 0) {
+      continue;
     }
+
+    if (samples.length < MIN_MATCHES_FOR_BIAS) {
+      lessons.push(`- ${describeInformativeContext(team, samples)}`);
+      continue;
+    }
+
+    const adjustment = computeCalibrationAdjustment(samples);
+    adjustments.set(team, adjustment);
+    lessons.push(`- ${describeAggregatedDiagnosis(team, samples, adjustment)}`);
   }
 
-  return lessons.length > 0 ? lessons.join('\n') : null;
+  return {
+    narrative: lessons.length > 0 ? lessons.join('\n') : null,
+    adjustments
+  };
+}
+
+export function applyCalibration(
+  stats: TeamStats,
+  adjustment: CalibrationAdjustment | undefined
+): TeamStats {
+  if (!adjustment) {
+    return stats;
+  }
+
+  return {
+    ...stats,
+    avg_goals_scored: Math.max(
+      MIN_ADJUSTED_AVERAGE,
+      roundTo(stats.avg_goals_scored + adjustment.attack_shift, 2)
+    ),
+    avg_goals_conceded: Math.max(
+      MIN_ADJUSTED_AVERAGE,
+      roundTo(stats.avg_goals_conceded + adjustment.defense_shift, 2)
+    )
+  };
 }
 
 async function fetchFinishedMatches(): Promise<FinishedMatch[]> {
@@ -92,16 +141,25 @@ function buildSample(team: string, match: FinishedMatch, verdict: PredictionVerd
   };
 }
 
-function describeTeamLesson(team: string, samples: TeamSample[]): string | null {
-  if (samples.length === 0) {
-    return null;
+function computeCalibrationAdjustment(samples: TeamSample[]): CalibrationAdjustment {
+  const avgAttackDelta = average(samples.map((sample) => sample.attackDelta));
+  const avgDefenseDelta = average(samples.map((sample) => sample.defenseDelta));
+
+  return {
+    attack_shift: dampedShift(avgAttackDelta),
+    defense_shift: dampedShift(avgDefenseDelta),
+    matches: samples.length,
+    hits: samples.filter((sample) => sample.hit).length
+  };
+}
+
+function dampedShift(avgDelta: number): number {
+  if (Math.abs(avgDelta) < BIAS_GOAL_THRESHOLD) {
+    return 0;
   }
 
-  if (samples.length < MIN_MATCHES_FOR_BIAS) {
-    return describeInformativeContext(team, samples);
-  }
-
-  return describeAggregatedDiagnosis(team, samples);
+  const shift = -avgDelta * CALIBRATION_DAMPING;
+  return roundTo(Math.min(Math.max(shift, -MAX_CALIBRATION_SHIFT), MAX_CALIBRATION_SHIFT), 2);
 }
 
 function describeInformativeContext(team: string, samples: TeamSample[]): string {
@@ -110,58 +168,48 @@ function describeInformativeContext(team: string, samples: TeamSample[]): string
     .map((sample) => `${sample.header} (la IA predijo ${sample.predictedScore})`)
     .join('; ');
 
-  return `Contexto informativo de ${team} (muestra insuficiente: ${matchCount} finalizados): ${summary}. NO ajustes pesos, probabilidades ni nivel_certeza con esta muestra; úsala solo como referencia descriptiva.`;
+  return `Contexto informativo de ${team} (muestra insuficiente: ${matchCount} finalizados): ${summary}. Esta muestra no alteró ningún número; úsala solo como referencia descriptiva en la redacción.`;
 }
 
-function describeAggregatedDiagnosis(team: string, samples: TeamSample[]): string {
-  const total = samples.length;
-  const hits = samples.filter((sample) => sample.hit).length;
-  const avgAttackDelta = average(samples.map((sample) => sample.attackDelta));
-  const avgDefenseDelta = average(samples.map((sample) => sample.defenseDelta));
+function describeAggregatedDiagnosis(
+  team: string,
+  samples: TeamSample[],
+  adjustment: CalibrationAdjustment
+): string {
+  const corrections: string[] = [];
 
-  const parts = [
-    `Diagnóstico acumulado de ${team} (${total} partidos finalizados): la IA acertó el ganador en ${hits} de ${total}.`,
-    describeAttackBias(team, avgAttackDelta),
-    describeDefenseBias(team, avgDefenseDelta),
-    `Ajusta tu ponderación cualitativa de ${team} únicamente conforme a este patrón agregado.`
-  ];
+  if (adjustment.attack_shift !== 0) {
+    const direction = adjustment.attack_shift > 0 ? 'subestimó' : 'sobreestimó';
+    corrections.push(
+      `${direction} su producción ofensiva, por lo que el motor ya corrigió su promedio goleador en ${formatShift(adjustment.attack_shift)}`
+    );
+  }
 
-  return parts.join(' ');
+  if (adjustment.defense_shift !== 0) {
+    const direction = adjustment.defense_shift > 0 ? 'subestimó los goles que recibiría' : 'sobreestimó los goles que recibiría';
+    corrections.push(
+      `${direction}, por lo que el motor ya corrigió su promedio de goles en contra en ${formatShift(adjustment.defense_shift)}`
+    );
+  }
+
+  const correctionText =
+    corrections.length > 0
+      ? `La IA ${corrections.join('; además, ')}.`
+      : 'Su calibración ofensiva y defensiva resultó correcta, así que no se aplicó corrección numérica.';
+
+  return `Diagnóstico acumulado de ${team} (${samples.length} partidos finalizados, ganador acertado en ${adjustment.hits} de ${samples.length}): ${correctionText} Estas correcciones ya están reflejadas en los cálculos deterministas recibidos; cítalas en la redacción sin alterar ningún número.`;
 }
 
-function describeAttackBias(team: string, avgDelta: number): string {
-  const magnitude = formatGoals(Math.abs(avgDelta));
-
-  if (avgDelta >= BIAS_GOAL_THRESHOLD) {
-    return `En promedio sobreestimó la producción ofensiva de ${team} en ${magnitude} por partido.`;
-  }
-
-  if (avgDelta <= -BIAS_GOAL_THRESHOLD) {
-    return `En promedio subestimó la producción ofensiva de ${team} en ${magnitude} por partido.`;
-  }
-
-  return `Su producción ofensiva está bien calibrada (desvío medio de ${formatGoals(avgDelta)}).`;
-}
-
-function describeDefenseBias(team: string, avgDelta: number): string {
-  const magnitude = formatGoals(Math.abs(avgDelta));
-
-  if (avgDelta >= BIAS_GOAL_THRESHOLD) {
-    return `Su defensa rindió mejor de lo previsto: la IA esperaba ${magnitude} más en contra por partido.`;
-  }
-
-  if (avgDelta <= -BIAS_GOAL_THRESHOLD) {
-    return `Su defensa rindió peor de lo previsto: la IA esperaba ${magnitude} menos en contra por partido.`;
-  }
-
-  return `Su rendimiento defensivo está bien calibrado (desvío medio de ${formatGoals(avgDelta)}).`;
+function formatShift(shift: number): string {
+  const value = Math.abs(shift);
+  return `${shift > 0 ? '+' : '-'}${value} ${value === 1 ? 'gol' : 'goles'} por partido`;
 }
 
 function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function formatGoals(value: number): string {
-  const rounded = Math.round(value * 100) / 100;
-  return `${rounded} ${Math.abs(rounded) === 1 ? 'gol' : 'goles'}`;
+function roundTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 }

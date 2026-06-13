@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { buildDeterministicReport } from '../src/lib/prediction-engine.js';
 import { requestConsensus } from '../src/pages/api/predict.js';
-import { buildTournamentFeedback } from '../src/lib/feedback-loop.js';
+import { applyCalibration, buildTournamentContext } from '../src/lib/feedback-loop.js';
 
 const supabaseUrl = process.env.PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -53,13 +53,31 @@ async function precompute() {
     const match = matches[i];
     console.log(`Precomputando partido ${i + 1} de ${matches.length}... (${match.home_team} vs ${match.away_team})`);
 
-    const homeStats = statsMap.get(match.home_team);
-    const awayStats = statsMap.get(match.away_team);
+    const rawHomeStats = statsMap.get(match.home_team);
+    const rawAwayStats = statsMap.get(match.away_team);
 
-    if (!homeStats || !awayStats) {
+    if (!rawHomeStats || !rawAwayStats) {
       console.error(`Error: Estadísticas no encontradas para el partido ${match.id}`);
       continue;
     }
+
+    const tournamentContext = await buildTournamentContext(
+      match.home_team,
+      match.away_team
+    ).catch(() => ({ narrative: null, adjustments: new Map() }));
+
+    if (tournamentContext.narrative) {
+      console.log(`↺ Contexto del torneo aplicado al partido ${match.id}.`);
+    }
+
+    const homeStats = applyCalibration(
+      rawHomeStats,
+      tournamentContext.adjustments.get(match.home_team)
+    );
+    const awayStats = applyCalibration(
+      rawAwayStats,
+      tournamentContext.adjustments.get(match.away_team)
+    );
 
     const deterministicReport = buildDeterministicReport(homeStats, awayStats);
 
@@ -79,25 +97,16 @@ async function precompute() {
       calculos_deterministas: deterministicReport
     };
 
-    const tournamentFeedback = await buildTournamentFeedback(
-      match.home_team,
-      match.away_team
-    ).catch(() => null);
-
-    if (tournamentFeedback) {
-      console.log(`↺ Lecciones del torneo aplicadas al partido ${match.id}.`);
-    }
-
     try {
-      const { prediction, failure } = await requestConsensus(
+      const { prediction } = await requestConsensus(
         matchContext,
         match.home_team,
         match.away_team,
-        tournamentFeedback
+        tournamentContext.narrative
       );
 
       if (!prediction) {
-        console.error(`Validación estricta fallida para el partido ${match.id}: ${failure}`);
+        console.error(`No fue posible generar la predicción del partido ${match.id}.`);
         continue;
       }
 

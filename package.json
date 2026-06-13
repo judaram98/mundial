@@ -12,6 +12,8 @@
     "ingest": "node --env-file=.env --import tsx scripts/ingest-real-data.js",
     "clear-cache": "node --env-file=.env scripts/clear-cache.js",
     "precompute": "node --env-file=.env --import tsx scripts/precompute-predictions.js",
+    "backtest": "node --env-file=.env --import tsx scripts/backtest.js",
+    "update-cycle": "npm run ingest && npm run clear-cache && npm run precompute",
     "hard-reset": "node --env-file=.env scripts/hard-reset.js",
     "deploy-reality": "node scripts/deploy-reality.js"
   },

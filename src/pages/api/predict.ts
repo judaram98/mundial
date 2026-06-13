@@ -8,7 +8,7 @@ import {
 } from '../../lib/prediction-engine';
 import type { Prediction, PredictionCache } from '../../lib/prediction-types';
 import { isPlaceholderMatch } from '../../lib/placeholders';
-import { buildTournamentFeedback } from '../../lib/feedback-loop';
+import { applyCalibration, buildTournamentContext } from '../../lib/feedback-loop';
 
 export const prerender = false;
 
@@ -21,39 +21,23 @@ const openai = new OpenAI({ apiKey });
 const MODEL = 'gpt-4o';
 const MAX_ATTEMPTS = 2;
 
-const SYSTEM_PROMPT = `Eres un motor de consenso y síntesis textual para predicciones de fútbol internacional. NO eres una calculadora: toda la aritmética ya fue ejecutada de forma determinista por el backend y te llega resuelta.
+const SYSTEM_PROMPT = `Eres el redactor técnico de un motor determinista de predicciones de fútbol internacional. TODOS los números ya están decididos por el backend: probabilidades finales, ganador esperado, marcador exacto y nivel de certeza llegan resueltos en el bloque consenso_final y NO pueden cambiarse.
 
-Recibirás un JSON con los datos del partido, las estadísticas del ciclo mundialista de ambos equipos y el bloque calculos_deterministas con los resultados exactos de tres metodologías independientes más su combinación de mercado:
-1. simulacion_poisson: lambdas de goles esperados ajustados por la calidad Elo del rival de turno (un promedio goleador contra rivales débiles vale menos contra un rival fuerte), probabilidades de victoria local/empate/victoria visitante derivadas de la matriz de Poisson completa, marcador más probable y su probabilidad.
-2. diferencial_elo: Elo de cada equipo, bonus_localia (los anfitriones México, Estados Unidos y Canadá reciben +80 Elo cuando juegan como locales), elo_local_efectivo, diferencia y expectativa del local según E = 1/(1 + 10^(-diferencia/400)), variación de Elo de cada equipo durante el ciclo y probabilidades a tres bandas suavizadas: ningún resultado puede valer 0%, todos tienen un piso matemático.
-3. momento_forma_xg: por equipo, puntuación de forma ponderada por recencia (0-100), tendencia, delta de finalización (goles reales menos xG a favor), delta defensivo (goles recibidos menos xG en contra), balance de xG y el equipo al que favorece la metodología. El campo xg_disponible indica si hay datos de xG: cuando es false, los deltas y balances de xG llegan como null.
-4. mercado_1x2: la combinación determinista del mercado 1X2 (promedio de las probabilidades de Poisson y Elo), con ganador_argmax (el resultado de probabilidad combinada más alta) y marcador_argmax (el marcador de Poisson coherente con ese resultado).
+Recibirás un JSON con los datos del partido, las estadísticas del ciclo mundialista de ambos equipos y el bloque calculos_deterministas:
+1. simulacion_poisson: lambdas de goles esperados ajustados por la calidad Elo del rival, con corrección Dixon-Coles para marcadores bajos (rho_dixon_coles), probabilidades a tres bandas, marcador más probable y mejores marcadores por desenlace.
+2. diferencial_elo: Elo de cada equipo, bonus_localia del anfitrión calibrado por backtesting, elo_local_efectivo, diferencia, expectativa del local según E = 1/(1 + 10^(-diferencia/400)), variación de Elo durante el ciclo y probabilidades suavizadas (ningún resultado baja del 5%).
+3. momento_forma_xg: puntuación de forma ponderada por recencia (0-100), tendencia, deltas de xG cuando existen (xg_disponible) y el equipo al que favorece.
+4. mercado_1x2: la mezcla ponderada de Poisson y Elo (peso_poisson calibrado por backtesting sobre cientos de partidos reales) con su argmax.
+5. consenso_final: las probabilidades enteras DEFINITIVAS, el ganador, el marcador, el nivel_certeza (derivado de cuántas metodologías están alineadas: metodologias_alineadas) — este bloque es la verdad final.
 
-Tienes PROHIBIDO recalcular, corregir o contradecir esos números. Tu única tarea es combinarlos en un consenso final y redactar la síntesis textual.
+Tu única tarea es redactar dos campos de texto en español citando fielmente esos números:
+- analisis: síntesis del consenso (4 a 7 frases) que explique por qué consenso_final favorece ese desenlace, citando probabilidades, lambdas, diferencia de Elo, expectativa y forma. Si hay lecciones del torneo en el contexto, explica cómo las correcciones ya aplicadas moldearon los números. Si xg_disponible es false, aclara que no hay datos de xG y que la forma es solo matiz cualitativo. Si data_source es simulated, no presentes los valores como hechos históricos verificados.
+- desglose_consenso: una conclusión textual por metodología (simulacion_poisson, diferencial_elo, momento_forma_xg) basada exclusivamente en sus propios números.
 
-REGLA ARGMAX (máxima prioridad, no negociable):
-- ganador_esperado DEBE ser el resultado cuya probabilidad final entera sea la más alta de las tres. Nunca declares un ganador cuyo entero no sea el máximo.
-- Empate solo puede declararse si su entero es ESTRICTAMENTE mayor que victoria_local y que victoria_visitante. Ante igualdad entre un equipo y el empate, el ganador es el equipo.
-- NUNCA fuerces un empate por paridad percibida entre los equipos: sin superioridad estricta del entero de empate, manda el equipo con mayor probabilidad.
-- Usa mercado_1x2 como ancla del consenso: tus enteros finales deben mantenerse cerca de sus probabilidades combinadas y solo pueden desplazar el argmax respecto a mercado_1x2.ganador_argmax si un Diagnóstico acumulado del torneo lo justifica explícitamente en el analisis.
-
-Reglas de salida obligatorias:
-- victoria_local, empate y victoria_visitante deben ser números ENTEROS que sumen EXACTAMENTE 100, obtenidos ponderando las probabilidades ya calculadas, sin inventar valores alejados de ellas.
-- Si xg_disponible es false, el consenso debe basarse exclusivamente en simulacion_poisson, diferencial_elo y mercado_1x2, usando la puntuación de forma y la tendencia solo como matiz cualitativo del análisis.
-- ganador_esperado debe ser el nombre exacto de uno de los dos equipos o la palabra Empate.
-- nivel_certeza con xg_disponible true: ALTA si las tres metodologías favorecen el mismo resultado, MEDIA si dos coinciden y una difiere, BAJA si hay divergencia significativa. Con xg_disponible false: ALTA si Poisson y Elo coinciden claramente en el mismo ganador, MEDIA si coinciden con margen estrecho, BAJA si divergen.
-- analisis y desglose_consenso deben citar los números recibidos sin alterarlos; si xg_disponible es false, la entrada momento_forma_xg debe limitarse a la forma reciente y aclarar que no hay datos de xG.
-- Si data_source es simulated, no presentes los valores como hechos históricos verificados.
+Tienes PROHIBIDO inventar, recalcular o contradecir cualquier número recibido.
 
 Responde estrictamente con un objeto JSON válido con esta estructura exacta, sin texto adicional ni markdown:
 {
-  "probabilidades": {
-    "victoria_local": "number",
-    "empate": "number",
-    "victoria_visitante": "number"
-  },
-  "ganador_esperado": "string",
-  "nivel_certeza": "ALTA" | "MEDIA" | "BAJA",
   "analisis": "<síntesis del consenso citando los números>",
   "desglose_consenso": {
     "simulacion_poisson": "<conclusión textual basada en sus números>",
@@ -62,78 +46,123 @@ Responde estrictamente con un objeto JSON válido con esta estructura exacta, si
   }
 }`;
 
-function composeSystemPrompt(tournamentFeedback: string | null): string {
-  if (!tournamentFeedback) {
+interface ConsensusTexts {
+  analisis: string;
+  desglose_consenso: {
+    simulacion_poisson: string;
+    diferencial_elo: string;
+    momento_forma_xg: string;
+  };
+}
+
+function composeSystemPrompt(tournamentNarrative: string | null): string {
+  if (!tournamentNarrative) {
     return SYSTEM_PROMPT;
   }
 
   return `${SYSTEM_PROMPT}
 
-[CONTEXTO DEL TORNEO Y AUTO-CORRECCIÓN]
+[CONTEXTO DEL TORNEO]
 Información verificada de partidos ya finalizados en este Mundial que involucran a los equipos de este encuentro:
-${tournamentFeedback}
+${tournamentNarrative}
 
-Instrucciones de uso del contexto (obligatorias, subordinadas a las reglas anteriores):
-- Las entradas marcadas como "Diagnóstico acumulado" provienen de una muestra suficiente (3 o más partidos finalizados del equipo): aplícalas ajustando tu ponderación cualitativa entre metodologías y el nivel_certeza, y cita en el analisis qué diagnóstico aplicaste y cómo modificó tu ponderación.
-- Las entradas marcadas como "Contexto informativo" provienen de una muestra insuficiente (1 o 2 partidos): tienes PROHIBIDO ajustar pesos, probabilidades o nivel_certeza por ellas; menciónalas a lo sumo como matiz descriptivo del análisis.
-- La REGLA ARGMAX y las reglas de salida obligatorias conservan prioridad absoluta sobre esta sección.`;
+Las correcciones numéricas descritas ya fueron aplicadas por el motor determinista antes de calcular los números que recibes; tu redacción debe citarlas como contexto sin alterar ningún valor.`;
 }
 
-function parseStructure(value: unknown): Prediction | null {
+function parseTexts(value: unknown): ConsensusTexts | null {
   if (typeof value !== 'object' || value === null) {
     return null;
   }
 
   const candidate = value as Record<string, unknown>;
-  const probabilities = candidate.probabilidades as Record<string, unknown> | undefined;
   const consensus = candidate.desglose_consenso as Record<string, unknown> | undefined;
 
   const isValid =
-    typeof probabilities?.victoria_local === 'number' &&
-    typeof probabilities?.empate === 'number' &&
-    typeof probabilities?.victoria_visitante === 'number' &&
-    typeof candidate.ganador_esperado === 'string' &&
-    ['ALTA', 'MEDIA', 'BAJA'].includes(candidate.nivel_certeza as string) &&
     typeof candidate.analisis === 'string' &&
+    candidate.analisis.trim().length > 0 &&
     typeof consensus?.simulacion_poisson === 'string' &&
+    consensus.simulacion_poisson.trim().length > 0 &&
     typeof consensus?.diferencial_elo === 'string' &&
-    typeof consensus?.momento_forma_xg === 'string';
+    consensus.diferencial_elo.trim().length > 0 &&
+    typeof consensus?.momento_forma_xg === 'string' &&
+    consensus.momento_forma_xg.trim().length > 0;
 
-  return isValid ? (value as Prediction) : null;
+  return isValid ? (value as unknown as ConsensusTexts) : null;
 }
 
-function validateRules(prediction: Prediction, homeTeam: string, awayTeam: string): string | null {
-  const { victoria_local, empate, victoria_visitante } = prediction.probabilidades;
-  const probabilities = [victoria_local, empate, victoria_visitante];
+function buildFallbackTexts(
+  report: DeterministicReport,
+  homeTeam: string,
+  awayTeam: string
+): ConsensusTexts {
+  const consenso = report.consenso_final;
+  const poisson = report.simulacion_poisson;
+  const elo = report.diferencial_elo;
+  const forma = report.momento_forma_xg;
+  const { victoria_local, empate, victoria_visitante } = consenso.probabilidades;
 
-  if (probabilities.some((p) => !Number.isInteger(p) || p < 0 || p > 100)) {
-    return 'Las probabilidades deben ser enteros entre 0 y 100.';
-  }
+  return {
+    analisis: `El consenso determinista asigna ${victoria_local}% a ${homeTeam}, ${empate}% al empate y ${victoria_visitante}% a ${awayTeam}, con ${consenso.ganador} como desenlace más probable y marcador estimado ${consenso.marcador}. ${consenso.metodologias_alineadas} de 3 metodologías están alineadas con ese desenlace, lo que define una certeza ${consenso.nivel_certeza}.`,
+    desglose_consenso: {
+      simulacion_poisson: `Con lambdas ajustados por rival de ${poisson.lambda_local} y ${poisson.lambda_visitante}, la matriz de Poisson reparte ${poisson.probabilidades.victoria_local}% / ${poisson.probabilidades.empate}% / ${poisson.probabilidades.victoria_visitante}% y señala ${poisson.marcador_mas_probable} como marcador más probable (${poisson.probabilidad_marcador}%).`,
+      diferencial_elo: `La diferencia de Elo efectiva es ${elo.diferencia} (expectativa del local ${elo.expectativa_local}), lo que reparte ${elo.probabilidades.victoria_local}% / ${elo.probabilidades.empate}% / ${elo.probabilidades.victoria_visitante}%.`,
+      momento_forma_xg: forma.xg_disponible
+        ? `La forma reciente puntúa ${forma.local.puntuacion_forma} contra ${forma.visitante.puntuacion_forma} y el balance de xG favorece a ${forma.favorece}.`
+        : `Sin datos de xG disponibles, la forma reciente puntúa ${forma.local.puntuacion_forma} contra ${forma.visitante.puntuacion_forma} (favorece: ${forma.favorece}) y se usa solo como matiz cualitativo.`
+    }
+  };
+}
 
-  if (victoria_local + empate + victoria_visitante !== 100) {
-    return 'Las probabilidades deben sumar exactamente 100.';
-  }
+async function requestSynthesis(
+  matchContext: Record<string, unknown>,
+  tournamentNarrative: string | null
+): Promise<ConsensusTexts | null> {
+  const systemPrompt = composeSystemPrompt(tournamentNarrative);
+  let failure: string | null = null;
 
-  if (![homeTeam, awayTeam, 'Empate'].includes(prediction.ganador_esperado)) {
-    return 'El ganador esperado debe ser uno de los dos equipos o Empate.';
-  }
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const feedback = failure
+      ? `\nTu respuesta anterior fue rechazada: ${failure} Corrige exactamente ese problema.`
+      : '';
 
-  if (
-    prediction.ganador_esperado === 'Empate' &&
-    (empate <= victoria_local || empate <= victoria_visitante)
-  ) {
-    return 'El empate solo puede declararse si su probabilidad es estrictamente mayor que la de ambos equipos.';
-  }
+    let content: string | null | undefined;
 
-  const winnerProbability =
-    prediction.ganador_esperado === homeTeam
-      ? victoria_local
-      : prediction.ganador_esperado === awayTeam
-        ? victoria_visitante
-        : empate;
+    try {
+      const completion = await openai.chat.completions.create({
+        model: MODEL,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: `Redacta la síntesis en formato JSON para este partido:\n${JSON.stringify(matchContext)}${feedback}`
+          }
+        ]
+      });
 
-  if (winnerProbability !== Math.max(...probabilities)) {
-    return 'El ganador esperado no corresponde a la probabilidad más alta.';
+      content = completion.choices[0]?.message?.content;
+    } catch {
+      failure = 'La llamada al modelo falló.';
+      continue;
+    }
+
+    if (!content) {
+      failure = 'La respuesta del modelo llegó sin contenido.';
+      continue;
+    }
+
+    try {
+      const texts = parseTexts(JSON.parse(content));
+
+      if (texts) {
+        return texts;
+      }
+
+      failure = 'La respuesta no cumple la estructura exacta requerida.';
+    } catch {
+      failure = 'La respuesta del modelo no es JSON válido.';
+    }
   }
 
   return null;
@@ -143,71 +172,26 @@ export async function requestConsensus(
   matchContext: Record<string, unknown>,
   homeTeam: string,
   awayTeam: string,
-  tournamentFeedback: string | null = null
+  tournamentNarrative: string | null = null
 ): Promise<{ prediction: Prediction | null; failure: string | null }> {
   const report = matchContext.calculos_deterministas as DeterministicReport;
-  const systemPrompt = composeSystemPrompt(tournamentFeedback);
-  let failure: string | null = null;
+  const consenso = report.consenso_final;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const feedback = failure
-      ? `\nTu respuesta anterior fue rechazada por la validación estricta: ${failure} Corrige exactamente ese problema manteniendo el resto de reglas.`
-      : '';
+  const texts =
+    (await requestSynthesis(matchContext, tournamentNarrative)) ??
+    buildFallbackTexts(report, homeTeam, awayTeam);
 
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Genera el consenso y la síntesis en formato JSON para este partido:\n${JSON.stringify(matchContext)}${feedback}`
-        }
-      ]
-    });
-
-    const content = completion.choices[0]?.message?.content;
-
-    if (!content) {
-      failure = 'La respuesta del modelo llegó sin contenido.';
-      continue;
-    }
-
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      failure = 'La respuesta del modelo no es JSON válido.';
-      continue;
-    }
-
-    const prediction = parseStructure(parsed);
-
-    if (!prediction) {
-      failure = 'La respuesta no cumple la estructura exacta requerida.';
-      continue;
-    }
-
-    failure = validateRules(prediction, homeTeam, awayTeam);
-
-    if (!failure) {
-      const mejores = report.simulacion_poisson.mejores_marcadores;
-
-      if (prediction.ganador_esperado === homeTeam) {
-        prediction.marcador_exacto = mejores.victoria_local;
-      } else if (prediction.ganador_esperado === awayTeam) {
-        prediction.marcador_exacto = mejores.victoria_visitante;
-      } else {
-        prediction.marcador_exacto = mejores.empate;
-      }
-
-      return { prediction, failure: null };
-    }
-  }
-
-  return { prediction: null, failure };
+  return {
+    prediction: {
+      probabilidades: { ...consenso.probabilidades },
+      marcador_exacto: consenso.marcador,
+      ganador_esperado: consenso.ganador,
+      nivel_certeza: consenso.nivel_certeza,
+      analisis: texts.analisis,
+      desglose_consenso: { ...texts.desglose_consenso }
+    },
+    failure: null
+  };
 }
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -287,12 +271,20 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const typedStats = stats as TeamStats[];
-  const homeStats = typedStats.find((row) => row.team_name === match.home_team);
-  const awayStats = typedStats.find((row) => row.team_name === match.away_team);
+  const rawHomeStats = typedStats.find((row) => row.team_name === match.home_team);
+  const rawAwayStats = typedStats.find((row) => row.team_name === match.away_team);
 
-  if (!homeStats || !awayStats) {
+  if (!rawHomeStats || !rawAwayStats) {
     return jsonResponse({ error: 'Estadísticas de los equipos no disponibles.' }, 500);
   }
+
+  const tournamentContext = await buildTournamentContext(
+    match.home_team,
+    match.away_team
+  ).catch(() => ({ narrative: null, adjustments: new Map() }));
+
+  const homeStats = applyCalibration(rawHomeStats, tournamentContext.adjustments.get(match.home_team));
+  const awayStats = applyCalibration(rawAwayStats, tournamentContext.adjustments.get(match.away_team));
 
   const deterministicReport: DeterministicReport = buildDeterministicReport(homeStats, awayStats);
 
@@ -312,24 +304,16 @@ export const POST: APIRoute = async ({ request }) => {
     calculos_deterministas: deterministicReport
   };
 
-  const tournamentFeedback = await buildTournamentFeedback(
-    match.home_team,
-    match.away_team
-  ).catch(() => null);
-
   try {
-    const { prediction, failure } = await requestConsensus(
+    const { prediction } = await requestConsensus(
       matchContext,
       match.home_team,
       match.away_team,
-      tournamentFeedback
+      tournamentContext.narrative
     );
 
     if (!prediction) {
-      return jsonResponse(
-        { error: `La predicción no superó la validación estricta: ${failure}` },
-        502
-      );
+      return jsonResponse({ error: 'No fue posible generar la predicción.' }, 502);
     }
 
     const cacheEntry: PredictionCache = {
@@ -345,6 +329,6 @@ export const POST: APIRoute = async ({ request }) => {
 
     return jsonResponse(buildSuccessBody(match, cacheEntry, false), 200);
   } catch {
-    return jsonResponse({ error: 'Error al generar la predicción con OpenAI.' }, 502);
+    return jsonResponse({ error: 'Error al generar la predicción.' }, 502);
   }
 };
